@@ -296,7 +296,7 @@ Exit criteria:
 
 ### Stage 7: Core MCP Tool Surface
 
-Owned write scope: `ClaudeCodexMcp/Tools/**`, `ClaudeCodexMcp/Discovery/**`, tool DTOs under `ClaudeCodexMcp/Domain/**`, tests under `ClaudeCodexMcp.Tests/Tools/**` and `ClaudeCodexMcp.Tests/Discovery/**`.
+Owned write scope: `ClaudeCodexMcp/Tools/**`, `ClaudeCodexMcp/Discovery/**`, tool DTOs under `ClaudeCodexMcp/Domain/**`, tests under `ClaudeCodexMcp.Tests/Tools/**` and `ClaudeCodexMcp.Tests/Discovery/**`. Stage 7 may also update `ClaudeCodexMcp/ClaudeCodexMcpHost.cs` for MCP tool registration, and `ClaudeCodexMcp/Domain/JobRecords.cs` plus `ClaudeCodexMcp/Storage/JobStore.cs` only for persisted backend identity needed by the Stage 7 tool surface.
 
 Intent:
 

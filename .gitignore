@@ -360,10 +360,7 @@ MigrationBackup/
 .ionide/
 
 # Fody - auto-generated XML schema
-FodyWeavers.xsd
-
-# AI Docs
-Docs/
+FodyWeavers.xsd 
 
 # Claude Codex MCP runtime and local configuration
 .codex-manager/

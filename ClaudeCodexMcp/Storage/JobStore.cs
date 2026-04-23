@@ -74,6 +74,8 @@ public sealed class JobStore
         Title = ProjectionSanitizer.ToSummary(job.Title, 160),
         Status = job.Status,
         CodexThreadId = job.CodexThreadId,
+        CodexTurnId = job.CodexTurnId,
+        CodexSessionId = job.CodexSessionId,
         ResultSummary = ProjectionSanitizer.ToOptionalSummary(job.ResultSummary),
         LastError = ProjectionSanitizer.ToOptionalSummary(job.LastError),
         InputQueue = job.InputQueue,

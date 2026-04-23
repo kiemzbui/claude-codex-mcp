@@ -14,7 +14,24 @@ public sealed record DiscoveryCacheRecord
 
     public DateTimeOffset UpdatedAt { get; init; }
 
+    public string? RepoRoot { get; init; }
+
+    public IReadOnlyList<DiscoveryRootSnapshot> Roots { get; init; } = [];
+
     public IReadOnlyList<DiscoveryCacheItem> Items { get; init; } = [];
+}
+
+public sealed record DiscoveryRootSnapshot
+{
+    public string SourceScope { get; init; } = string.Empty;
+
+    public string RootPath { get; init; } = string.Empty;
+
+    public bool Exists { get; init; }
+
+    public long MaxLastWriteTimeUtcTicks { get; init; }
+
+    public int FileCount { get; init; }
 }
 
 public sealed record DiscoveryCacheItem
@@ -30,4 +47,6 @@ public sealed record DiscoveryCacheItem
     public bool Enabled { get; init; } = true;
 
     public IReadOnlyList<string> ConflictsWith { get; init; } = [];
+
+    public string? BodyPath { get; init; }
 }

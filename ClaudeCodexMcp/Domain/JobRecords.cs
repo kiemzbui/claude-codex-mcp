@@ -78,6 +78,10 @@ public sealed record CodexJobRecord
 
     public string? CodexThreadId { get; init; }
 
+    public string? CodexTurnId { get; init; }
+
+    public string? CodexSessionId { get; init; }
+
     public string? Model { get; init; }
 
     public string? Effort { get; init; }
@@ -131,6 +135,10 @@ public sealed record JobIndexEntry
     public JobState Status { get; init; }
 
     public string? CodexThreadId { get; init; }
+
+    public string? CodexTurnId { get; init; }
+
+    public string? CodexSessionId { get; init; }
 
     public string? ResultSummary { get; init; }
 

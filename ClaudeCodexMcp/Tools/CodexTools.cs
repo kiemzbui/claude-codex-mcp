@@ -1,0 +1,108 @@
+using ClaudeCodexMcp.Domain;
+using ModelContextProtocol.Server;
+
+namespace ClaudeCodexMcp.Tools;
+
+[McpServerToolType]
+public sealed class CodexTools
+{
+    private readonly CodexToolService service;
+
+    public CodexTools(CodexToolService service)
+    {
+        this.service = service;
+    }
+
+    [McpServerTool]
+    public CodexListProfilesResponse codex_list_profiles() =>
+        service.ListProfiles();
+
+    [McpServerTool]
+    public Task<DiscoveryBucketedResponse> codex_list_skills(
+        bool forceRefresh = false,
+        string? repo = null,
+        CancellationToken cancellationToken = default) =>
+        service.ListSkillsAsync(forceRefresh, repo, cancellationToken);
+
+    [McpServerTool]
+    public Task<DiscoveryBucketedResponse> codex_list_agents(
+        bool forceRefresh = false,
+        string? repo = null,
+        CancellationToken cancellationToken = default) =>
+        service.ListAgentsAsync(forceRefresh, repo, cancellationToken);
+
+    [McpServerTool]
+    public Task<DiscoveryDetailResponse> codex_get_skill(
+        string? name,
+        string? sourceScope = null,
+        string? sourcePath = null,
+        bool includeBody = false,
+        bool forceRefresh = false,
+        string? repo = null,
+        int maxBytes = 32768,
+        CancellationToken cancellationToken = default) =>
+        service.GetSkillAsync(name, sourceScope, sourcePath, includeBody, forceRefresh, repo, maxBytes, cancellationToken);
+
+    [McpServerTool]
+    public Task<DiscoveryDetailResponse> codex_get_agent(
+        string? name,
+        string? sourceScope = null,
+        string? sourcePath = null,
+        bool includePrompt = false,
+        bool forceRefresh = false,
+        string? repo = null,
+        int maxBytes = 32768,
+        CancellationToken cancellationToken = default) =>
+        service.GetAgentAsync(name, sourceScope, sourcePath, includePrompt, forceRefresh, repo, maxBytes, cancellationToken);
+
+    [McpServerTool]
+    public Task<CodexStartTaskResponse> codex_start_task(
+        string? profile,
+        string? workflow,
+        string? title,
+        string? repo,
+        string? prompt,
+        string? model = null,
+        string? effort = null,
+        bool? fastMode = null,
+        CancellationToken cancellationToken = default) =>
+        service.StartTaskAsync(profile, workflow, title, repo, prompt, model, effort, fastMode, cancellationToken);
+
+    [McpServerTool]
+    public Task<CodexStatusResponse> codex_status(
+        string? jobId,
+        bool wait = false,
+        int? timeoutSeconds = null,
+        CancellationToken cancellationToken = default) =>
+        service.StatusAsync(jobId, wait, timeoutSeconds, cancellationToken);
+
+    [McpServerTool]
+    public Task<CodexResultResponse> codex_result(
+        string? jobId,
+        string? detail = null,
+        CancellationToken cancellationToken = default) =>
+        service.ResultAsync(jobId, detail, cancellationToken);
+
+    [McpServerTool]
+    public Task<CodexSendInputResponse> codex_send_input(
+        string? jobId,
+        string? prompt,
+        string? model = null,
+        string? effort = null,
+        bool? fastMode = null,
+        CancellationToken cancellationToken = default) =>
+        service.SendInputAsync(jobId, prompt, model, effort, fastMode, cancellationToken);
+
+    [McpServerTool]
+    public Task<CodexCancelResponse> codex_cancel(
+        string? jobId,
+        CancellationToken cancellationToken = default) =>
+        service.CancelAsync(jobId, cancellationToken);
+
+    [McpServerTool]
+    public Task<CodexListJobsResponse> codex_list_jobs(
+        int limit = 50,
+        bool includeTerminal = true,
+        CancellationToken cancellationToken = default) =>
+        service.ListJobsAsync(limit, includeTerminal, cancellationToken);
+}

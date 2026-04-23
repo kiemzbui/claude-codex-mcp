@@ -1,5 +1,9 @@
+using ClaudeCodexMcp.Backend;
 using ClaudeCodexMcp.Configuration;
+using ClaudeCodexMcp.Discovery;
 using ClaudeCodexMcp.Logging;
+using ClaudeCodexMcp.Storage;
+using ClaudeCodexMcp.Tools;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -29,10 +33,31 @@ public static class ClaudeCodexMcpHost
             .Bind(builder.Configuration.GetSection(ManagerOptions.SectionName));
 
         ConfigureLogging(builder);
+        ConfigureServices(builder);
 
         builder.Services
             .AddMcpServer()
-            .WithStdioServerTransport();
+            .WithStdioServerTransport()
+            .WithTools<CodexTools>();
+    }
+
+    private static void ConfigureServices(HostApplicationBuilder builder)
+    {
+        builder.Services.AddSingleton(serviceProvider =>
+        {
+            var managerOptions = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ManagerOptions>>().Value;
+            return new ManagerStatePaths(managerOptions.ResolveStateDirectory(builder.Environment.ContentRootPath));
+        });
+        builder.Services.AddSingleton<IProfilePolicyValidator, ProfilePolicyValidator>();
+        builder.Services.AddSingleton<JobStore>();
+        builder.Services.AddSingleton<QueueStore>();
+        builder.Services.AddSingleton<OutputStore>();
+        builder.Services.AddSingleton<DiscoveryCacheStore>();
+        builder.Services.AddSingleton(_ => CodexDiscoveryOptions.FromEnvironment());
+        builder.Services.AddSingleton<CodexCapabilityDiscovery>();
+        builder.Services.AddSingleton<IAppServerJsonRpcClientFactory, CodexAppServerProcessClientFactory>();
+        builder.Services.AddSingleton<ICodexBackend, CodexAppServerBackend>();
+        builder.Services.AddSingleton<CodexToolService>();
     }
 
     private static void ConfigureLogging(HostApplicationBuilder builder)
