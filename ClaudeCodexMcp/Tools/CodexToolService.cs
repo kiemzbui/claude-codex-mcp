@@ -4,6 +4,7 @@ using ClaudeCodexMcp.Discovery;
 using ClaudeCodexMcp.Domain;
 using ClaudeCodexMcp.Storage;
 using ClaudeCodexMcp.Supervisor;
+using ClaudeCodexMcp.Usage;
 using Microsoft.Extensions.Options;
 
 namespace ClaudeCodexMcp.Tools;
@@ -19,6 +20,7 @@ public sealed class CodexToolService
     private readonly ICodexBackend backend;
     private readonly CodexCapabilityDiscovery discovery;
     private readonly CodexJobLockRegistry jobLocks;
+    private readonly UsageReporter usageReporter;
 
     public CodexToolService(
         IOptions<ManagerOptions> options,
@@ -28,6 +30,27 @@ public sealed class CodexToolService
         ICodexBackend backend,
         CodexCapabilityDiscovery discovery,
         CodexJobLockRegistry jobLocks)
+        : this(
+            options,
+            policyValidator,
+            jobStore,
+            queueStore,
+            backend,
+            discovery,
+            jobLocks,
+            new UsageReporter())
+    {
+    }
+
+    public CodexToolService(
+        IOptions<ManagerOptions> options,
+        IProfilePolicyValidator policyValidator,
+        JobStore jobStore,
+        QueueStore queueStore,
+        ICodexBackend backend,
+        CodexCapabilityDiscovery discovery,
+        CodexJobLockRegistry jobLocks,
+        UsageReporter usageReporter)
     {
         this.options = options.Value;
         this.policyValidator = policyValidator;
@@ -36,6 +59,7 @@ public sealed class CodexToolService
         this.backend = backend;
         this.discovery = discovery;
         this.jobLocks = jobLocks;
+        this.usageReporter = usageReporter;
     }
 
     public CodexListProfilesResponse ListProfiles()
@@ -518,6 +542,83 @@ public sealed class CodexToolService
         };
     }
 
+    public async Task<CodexUsageResponse> UsageAsync(
+        string? jobId,
+        bool refresh = true,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            var usage = usageReporter.CreateSummary(null);
+            return new CodexUsageResponse
+            {
+                Usage = usage,
+                ContextRemainingPercentEstimate = usage.ContextRemainingPercentEstimate,
+                WeeklyUsageRemainingPercent = usage.WeeklyUsageRemainingPercent,
+                FiveHourUsageRemainingPercent = usage.FiveHourUsageRemainingPercent,
+                Statusline = usage.Statusline,
+                Errors = [MissingJobError(jobId)]
+            };
+        }
+
+        await using var lease = await jobLocks.AcquireAsync(jobId.Trim(), cancellationToken);
+        var job = await ReadJobOrNullAsync(jobId, cancellationToken);
+        if (job is null)
+        {
+            var usage = usageReporter.CreateSummary(null);
+            return new CodexUsageResponse
+            {
+                JobId = jobId.Trim(),
+                Usage = usage,
+                ContextRemainingPercentEstimate = usage.ContextRemainingPercentEstimate,
+                WeeklyUsageRemainingPercent = usage.WeeklyUsageRemainingPercent,
+                FiveHourUsageRemainingPercent = usage.FiveHourUsageRemainingPercent,
+                Statusline = usage.Statusline,
+                Errors = [MissingJobError(jobId)]
+            };
+        }
+
+        var errors = new List<ToolError>();
+        if (refresh &&
+            backend.Capabilities.SupportsReadUsage &&
+            !string.IsNullOrWhiteSpace(job.CodexThreadId))
+        {
+            try
+            {
+                var usageSnapshot = await backend.ReadUsageAsync(new CodexBackendUsageRequest
+                {
+                    JobId = job.JobId,
+                    BackendIds = ToBackendIds(job)
+                }, cancellationToken);
+                if (usageSnapshot.TokenUsage is not null || usageSnapshot.RateLimits is not null)
+                {
+                    job = CodexJobRecordUpdater.ApplyUsage(job, usageSnapshot);
+                    await jobStore.SaveAsync(job, cancellationToken);
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                errors.Add(new ToolError(
+                    "usage_read_failed",
+                    ProjectionSanitizer.ToSummary(exception.Message),
+                    "jobId"));
+            }
+        }
+
+        var normalized = usageReporter.CreateSummary(job.UsageSnapshot);
+        return new CodexUsageResponse
+        {
+            JobId = job.JobId,
+            Usage = normalized,
+            ContextRemainingPercentEstimate = normalized.ContextRemainingPercentEstimate,
+            WeeklyUsageRemainingPercent = normalized.WeeklyUsageRemainingPercent,
+            FiveHourUsageRemainingPercent = normalized.FiveHourUsageRemainingPercent,
+            Statusline = normalized.Statusline,
+            Job = ToCompact(job),
+            Errors = errors
+        };
+    }
+
     public async Task<CodexListJobsResponse> ListJobsAsync(
         int limit = 50,
         bool includeTerminal = true,
@@ -611,6 +712,7 @@ public sealed class CodexToolService
         CodexTurnId = status.BackendIds.TurnId ?? job.CodexTurnId,
         CodexSessionId = status.BackendIds.SessionId ?? job.CodexSessionId,
         WaitingForInput = status.WaitingForInput,
+        UsageSnapshot = status.UsageSnapshot ?? job.UsageSnapshot,
         LastError = ProjectionSanitizer.ToOptionalSummary(status.LastError)
     };
 
@@ -621,7 +723,7 @@ public sealed class CodexToolService
         SessionId = job.CodexSessionId
     };
 
-    private static CodexJobCompactResponse ToCompact(CodexJobRecord job) => new()
+    private CodexJobCompactResponse ToCompact(CodexJobRecord job) => new()
     {
         JobId = job.JobId,
         Title = ProjectionSanitizer.ToSummary(job.Title, 160),
@@ -641,10 +743,11 @@ public sealed class CodexToolService
         LastError = ProjectionSanitizer.ToOptionalSummary(job.LastError),
         InputQueue = job.InputQueue,
         LogRef = job.LogPath,
-        NotificationLogRef = job.NotificationLogPath
+        NotificationLogRef = job.NotificationLogPath,
+        Statusline = usageReporter.CreateStatusline(job.UsageSnapshot)
     };
 
-    private static CodexJobCompactResponse ToCompact(JobIndexEntry job) => new()
+    private CodexJobCompactResponse ToCompact(JobIndexEntry job) => new()
     {
         JobId = job.JobId,
         Title = ProjectionSanitizer.ToSummary(job.Title, 160),
@@ -659,7 +762,8 @@ public sealed class CodexToolService
         LastError = ProjectionSanitizer.ToOptionalSummary(job.LastError),
         InputQueue = job.InputQueue,
         LogRef = Path.Combine(".codex-manager", "logs", $"{job.JobId}.jsonl"),
-        NotificationLogRef = Path.Combine(".codex-manager", "notifications", $"{job.JobId}.jsonl")
+        NotificationLogRef = Path.Combine(".codex-manager", "notifications", $"{job.JobId}.jsonl"),
+        Statusline = UsageReporter.UnknownStatusline
     };
 
     private static ToolError MissingJobError(string? jobId) =>

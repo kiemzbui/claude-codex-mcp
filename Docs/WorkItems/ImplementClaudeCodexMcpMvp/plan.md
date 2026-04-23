@@ -384,7 +384,7 @@ Exit criteria:
 
 ### Stage 10: Usage And Statusline
 
-Owned write scope: `ClaudeCodexMcp/Usage/**`, usage DTOs under `ClaudeCodexMcp/Domain/**`, `ClaudeCodexMcp/Tools/**` only for `codex_usage` registration, tests under `ClaudeCodexMcp.Tests/Usage/**` and focused tool tests.
+Owned write scope: `ClaudeCodexMcp/Usage/**`, usage DTOs under `ClaudeCodexMcp/Domain/**`, `ClaudeCodexMcp/Tools/**` only for `codex_usage` registration, tests under `ClaudeCodexMcp.Tests/Usage/**` and focused tool tests. Stage 10 may also update `ClaudeCodexMcp/ClaudeCodexMcpHost.cs` only for usage service registration.
 
 Intent:
 

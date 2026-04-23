@@ -5,6 +5,7 @@ using ClaudeCodexMcp.Logging;
 using ClaudeCodexMcp.Storage;
 using ClaudeCodexMcp.Supervisor;
 using ClaudeCodexMcp.Tools;
+using ClaudeCodexMcp.Usage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -57,6 +58,7 @@ public static class ClaudeCodexMcpHost
         builder.Services.AddSingleton(_ => CodexDiscoveryOptions.FromEnvironment());
         builder.Services.AddSingleton<CodexCapabilityDiscovery>();
         builder.Services.AddSingleton<CodexJobLockRegistry>();
+        builder.Services.AddSingleton<UsageReporter>();
         builder.Services.AddSingleton<CodexJobSupervisorOptions>();
         builder.Services.AddSingleton<IAppServerJsonRpcClientFactory, CodexAppServerProcessClientFactory>();
         builder.Services.AddSingleton<ICodexBackend, CodexAppServerBackend>();

@@ -5,6 +5,7 @@ using ClaudeCodexMcp.Domain;
 using ClaudeCodexMcp.Storage;
 using ClaudeCodexMcp.Supervisor;
 using ClaudeCodexMcp.Tools;
+using ClaudeCodexMcp.Usage;
 using ClaudeCodexMcp.Workflows;
 using Microsoft.Extensions.Options;
 
@@ -270,6 +271,89 @@ public sealed class CodexToolServiceTests
         Assert.Equal(state, rejected.QueueItem?.Status);
     }
 
+    [Fact]
+    public async Task UsageRefreshPersistsBackendDataAndReturnsNormalizedFields()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var backend = new InspectingBackend(workspace.StateDirectory)
+        {
+            Usage = new CodexBackendUsageSnapshot
+            {
+                TokenUsage = new CodexBackendTokenUsage
+                {
+                    TotalTokens = 25,
+                    ContextWindowTokens = 100
+                },
+                RateLimits = new CodexBackendRateLimits
+                {
+                    Primary = new CodexBackendRateLimitWindow
+                    {
+                        UsedPercent = 40,
+                        WindowDurationMinutes = 300
+                    },
+                    Secondary = new CodexBackendRateLimitWindow
+                    {
+                        UsedPercent = 20,
+                        WindowDurationMinutes = 10_080
+                    }
+                }
+            }
+        };
+        var service = workspace.CreateService(backend);
+        var start = await service.StartTaskAsync("implementation", "direct", "Usage", workspace.RepoRoot, "Prompt");
+
+        var usage = await service.UsageAsync(start.Job!.JobId);
+
+        Assert.Equal(75, usage.ContextRemainingPercentEstimate);
+        Assert.Equal(80, usage.WeeklyUsageRemainingPercent);
+        Assert.Equal(60, usage.FiveHourUsageRemainingPercent);
+        Assert.Equal("[codex status: context 75% estimate | weekly 80% | 5h 60%]", usage.Statusline);
+        Assert.Equal(usage.Statusline, usage.Job?.Statusline);
+        var stored = await workspace.JobStore.ReadAsync(start.Job.JobId);
+        Assert.Equal(25, stored?.UsageSnapshot?.TokenUsage?.TotalTokens);
+    }
+
+    [Fact]
+    public async Task StatusResultAndSendInputIncludePersistedStatusline()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var backend = new InspectingBackend(workspace.StateDirectory)
+        {
+            StartStatus = new CodexBackendStatus
+            {
+                State = JobState.Running,
+                BackendIds = new CodexBackendIds { ThreadId = "thread-start", TurnId = "turn-start", SessionId = "session-start" },
+                UsageSnapshot = new CodexBackendUsageSnapshot
+                {
+                    TokenUsage = new CodexBackendTokenUsage
+                    {
+                        TotalTokens = 10,
+                        ContextWindowTokens = 100
+                    },
+                    RateLimits = new CodexBackendRateLimits
+                    {
+                        Primary = new CodexBackendRateLimitWindow
+                        {
+                            UsedPercent = 30,
+                            WindowDurationMinutes = 300
+                        }
+                    }
+                }
+            }
+        };
+        var service = workspace.CreateService(backend);
+        var start = await service.StartTaskAsync("implementation", "direct", "Statusline", workspace.RepoRoot, "Prompt");
+
+        var status = await service.StatusAsync(start.Job!.JobId);
+        var input = await service.SendInputAsync(start.Job.JobId, "Follow up");
+        var result = await service.ResultAsync(start.Job.JobId);
+
+        Assert.Equal("[codex status: context 90% estimate | weekly ? | 5h 70%]", start.Job.Statusline);
+        Assert.Equal(start.Job.Statusline, status.Job?.Statusline);
+        Assert.Equal(start.Job.Statusline, input.Job?.Statusline);
+        Assert.Equal(start.Job.Statusline, result.Job?.Statusline);
+    }
+
     private sealed class TemporaryToolWorkspace : IDisposable
     {
         private TemporaryToolWorkspace(string root, bool allowOverrides)
@@ -320,7 +404,8 @@ public sealed class CodexToolServiceTests
                 QueueStore,
                 backend ?? new InspectingBackend(StateDirectory),
                 discovery,
-                new CodexJobLockRegistry());
+                new CodexJobLockRegistry(),
+                new UsageReporter());
         }
 
         public void Dispose()
@@ -412,6 +497,8 @@ public sealed class CodexToolServiceTests
             FinalText = "final"
         };
 
+        public CodexBackendUsageSnapshot Usage { get; init; } = new();
+
         public Task<CodexBackendStartResult> StartAsync(
             CodexBackendStartRequest request,
             CancellationToken cancellationToken = default)
@@ -467,7 +554,7 @@ public sealed class CodexToolServiceTests
         public Task<CodexBackendUsageSnapshot> ReadUsageAsync(
             CodexBackendUsageRequest request,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult(new CodexBackendUsageSnapshot());
+            Task.FromResult(Usage);
 
         public Task<CodexBackendStatus> ResumeAsync(
             CodexBackendResumeRequest request,

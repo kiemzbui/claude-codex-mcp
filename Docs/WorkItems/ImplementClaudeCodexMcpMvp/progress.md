@@ -13,7 +13,7 @@
 - [x] Stage 7 - Core MCP Tool Surface
 - [x] Stage 8 - Background Supervisor
 - [x] Stage 9 - Queued Input And Cancellation
-- [ ] Stage 10 - Usage And Statusline
+- [x] Stage 10 - Usage And Statusline
 - [ ] Stage 11 - Full Output Pagination
 - [ ] Stage 12 - Channel Notifications
 - [ ] Stage 13 - CLI Fallback
@@ -22,9 +22,9 @@
 
 ## Current Checkpoint
 
-- Latest completed point: Stage 9 - Queued Input And Cancellation.
+- Latest completed point: Stage 10 - Usage And Statusline.
 - Active reality: app-server-first backend behavior is approved for continuation based on `app_server_feasibility.md`; CLI fallback remains required for degraded environments. Channel protocol prerequisites are present, so production channel notification work should still be implemented later as best-effort and fallback-aware, disabled by default until Manual Smoke Gate C verifies live delivery with a real `claude --channels server:claude-codex-mcp` receiver.
-- Next executable step: Stage 10 - Usage And Statusline.
+- Next executable step: Stage 11 - Full Output Pagination.
 - Next executor command: `$orchestrate execute Docs/WorkItems/ImplementClaudeCodexMcpMvp`.
 
 ## Checkpoint Notes
@@ -43,3 +43,4 @@
 - Stage 7 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, focused `ClaudeCodexMcp.Tests.Tools` and `ClaudeCodexMcp.Tests.Discovery` checks, and Stage 7 scope checks.
 - Stage 8 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, focused `ClaudeCodexMcp.Tests.Supervisor` and `ClaudeCodexMcp.Tests.Tools` checks, and Stage 8 scope checks.
 - Stage 9 verification passed with `dotnet build ClaudeCodexMcp.sln --no-restore --nologo`, `dotnet test ClaudeCodexMcp.sln --no-restore --nologo`, focused `ClaudeCodexMcp.Tests.Tools`, `ClaudeCodexMcp.Tests.Storage`, and `ClaudeCodexMcp.Tests.Supervisor` checks, `git diff --check`, and Stage 9 scope checks.
+- Stage 10 verification passed with `dotnet build ClaudeCodexMcp.sln --no-restore`, focused usage/statusline tests, `dotnet test ClaudeCodexMcp.sln --no-build`, `git diff --check`, Roslyn diagnostics review, and Stage 10 scope checks including the approved `ClaudeCodexMcp/ClaudeCodexMcpHost.cs` usage-service registration.

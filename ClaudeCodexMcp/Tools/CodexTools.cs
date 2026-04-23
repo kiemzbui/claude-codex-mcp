@@ -115,6 +115,13 @@ public sealed class CodexTools
         service.CancelAsync(jobId, cancellationToken);
 
     [McpServerTool]
+    public Task<CodexUsageResponse> codex_usage(
+        string? jobId,
+        bool refresh = true,
+        CancellationToken cancellationToken = default) =>
+        service.UsageAsync(jobId, refresh, cancellationToken);
+
+    [McpServerTool]
     public Task<CodexListJobsResponse> codex_list_jobs(
         int limit = 50,
         bool includeTerminal = true,
