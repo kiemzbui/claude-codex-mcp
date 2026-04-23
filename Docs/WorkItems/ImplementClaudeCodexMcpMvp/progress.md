@@ -10,7 +10,7 @@
 - [x] Stage 5 - Channel Feasibility Gate
 - [x] Manual Smoke Gate B - Channel Feasibility Review
 - [x] Stage 6 - Backend Abstraction And Minimal Lifecycle
-- [ ] Stage 7 - Core MCP Tool Surface
+- [x] Stage 7 - Core MCP Tool Surface
 - [ ] Stage 8 - Background Supervisor
 - [ ] Stage 9 - Queued Input And Cancellation
 - [ ] Stage 10 - Usage And Statusline
@@ -22,9 +22,9 @@
 
 ## Current Checkpoint
 
-- Latest completed point: Stage 6 - Backend Abstraction And Minimal Lifecycle.
+- Latest completed point: Stage 7 - Core MCP Tool Surface.
 - Active reality: app-server-first backend behavior is approved for continuation based on `app_server_feasibility.md`; CLI fallback remains required for degraded environments. Channel protocol prerequisites are present, so production channel notification work should still be implemented later as best-effort and fallback-aware, disabled by default until Manual Smoke Gate C verifies live delivery with a real `claude --channels server:claude-codex-mcp` receiver.
-- Next executable step: Stage 7 - Core MCP Tool Surface.
+- Next executable step: Stage 8 - Background Supervisor.
 - Next executor command: `$orchestrate execute Docs/WorkItems/ImplementClaudeCodexMcpMvp`.
 
 ## Checkpoint Notes
@@ -40,3 +40,4 @@
 - Stage 5 verification passed with `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln --filter FullyQualifiedName~Notifications`, `dotnet test ClaudeCodexMcp.sln`, and channel feasibility scope checks.
 - Manual Smoke Gate B passed on review of `channel_feasibility.md` with the condition that Stage 12 still implements channel notification support as best-effort and fallback-aware, disabled by default until Manual Smoke Gate C verifies live delivery through a real channel-enabled Claude receiver.
 - Stage 6 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.Tests\ClaudeCodexMcp.Tests.csproj --nologo --filter FullyQualifiedName~ClaudeCodexMcp.Tests.Backend`, `dotnet test ClaudeCodexMcp.sln --nologo`, and Stage 6 scope checks.
+- Stage 7 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, focused `ClaudeCodexMcp.Tests.Tools` and `ClaudeCodexMcp.Tests.Discovery` checks, and Stage 7 scope checks.
