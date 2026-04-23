@@ -1,8 +1,11 @@
 using ClaudeCodexMcp.Backend;
+using ClaudeCodexMcp.Configuration;
 using ClaudeCodexMcp.Domain;
+using ClaudeCodexMcp.Notifications;
 using ClaudeCodexMcp.Storage;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace ClaudeCodexMcp.Supervisor;
 
@@ -15,6 +18,8 @@ public sealed class CodexJobSupervisor : BackgroundService
     private readonly CodexJobLockRegistry jobLocks;
     private readonly ILogger<CodexJobSupervisor> logger;
     private readonly CodexJobSupervisorOptions options;
+    private readonly NotificationDispatcher? notificationDispatcher;
+    private readonly ManagerOptions? managerOptions;
     private readonly Dictionary<string, int> transientFailures = new(StringComparer.Ordinal);
 
     public CodexJobSupervisor(
@@ -24,7 +29,9 @@ public sealed class CodexJobSupervisor : BackgroundService
         ICodexBackend backend,
         CodexJobLockRegistry jobLocks,
         ILogger<CodexJobSupervisor> logger,
-        CodexJobSupervisorOptions? options = null)
+        CodexJobSupervisorOptions? options = null,
+        NotificationDispatcher? notificationDispatcher = null,
+        IOptions<ManagerOptions>? managerOptions = null)
     {
         this.jobStore = jobStore;
         this.queueStore = queueStore;
@@ -33,6 +40,8 @@ public sealed class CodexJobSupervisor : BackgroundService
         this.jobLocks = jobLocks;
         this.logger = logger;
         this.options = options ?? new CodexJobSupervisorOptions();
+        this.notificationDispatcher = notificationDispatcher;
+        this.managerOptions = managerOptions?.Value;
     }
 
     public async Task<CodexJobSupervisorResult> RecoverActiveJobsAsync(CancellationToken cancellationToken = default)
@@ -116,7 +125,7 @@ public sealed class CodexJobSupervisor : BackgroundService
             }
 
             var updated = await TryDeliverNextQueuedInputLockedAsync(job, cancellationToken);
-            await jobStore.SaveAsync(updated, cancellationToken);
+            await SaveAndNotifyStateChangeAsync(job, updated, cancellationToken);
             return updated;
         }
 
@@ -163,7 +172,7 @@ public sealed class CodexJobSupervisor : BackgroundService
             }
 
             var updated = await TryDeliverNextQueuedInputLockedAsync(job, cancellationToken);
-            await jobStore.SaveAsync(updated, cancellationToken);
+            await SaveAndNotifyStateChangeAsync(job, updated, cancellationToken);
             return updated;
         }
 
@@ -188,10 +197,12 @@ public sealed class CodexJobSupervisor : BackgroundService
             }, cancellationToken);
 
             transientFailures.Remove(job.JobId);
-            var updated = CodexJobRecordUpdater.ApplyStatus(job, status);
-            updated = await EnrichLockedAsync(updated, cancellationToken);
-            updated = await TryDeliverNextQueuedInputLockedAsync(updated, cancellationToken);
-            await jobStore.SaveAsync(updated, cancellationToken);
+            var observed = CodexJobRecordUpdater.ApplyStatus(job, status);
+            observed = await EnrichLockedAsync(observed, cancellationToken);
+            await SaveAndNotifyStateChangeAsync(job, observed, cancellationToken);
+
+            var updated = await TryDeliverNextQueuedInputLockedAsync(observed, cancellationToken);
+            await SaveAndNotifyStateChangeAsync(observed, updated, cancellationToken);
             return updated;
         }
         catch (CodexBackendThreadUnrecoverableException exception)
@@ -236,10 +247,12 @@ public sealed class CodexJobSupervisor : BackgroundService
             }
 
             transientFailures.Remove(job.JobId);
-            var updated = CodexJobRecordUpdater.ApplyStatus(job, status);
-            updated = await EnrichLockedAsync(updated, cancellationToken);
-            updated = await TryDeliverNextQueuedInputLockedAsync(updated, cancellationToken);
-            await jobStore.SaveAsync(updated, cancellationToken);
+            var observed = CodexJobRecordUpdater.ApplyStatus(job, status);
+            observed = await EnrichLockedAsync(observed, cancellationToken);
+            await SaveAndNotifyStateChangeAsync(job, observed, cancellationToken);
+
+            var updated = await TryDeliverNextQueuedInputLockedAsync(observed, cancellationToken);
+            await SaveAndNotifyStateChangeAsync(observed, updated, cancellationToken);
             return updated;
         }
         catch (CodexBackendThreadUnrecoverableException exception)
@@ -397,12 +410,23 @@ public sealed class CodexJobSupervisor : BackgroundService
             error,
             cancellationToken: cancellationToken);
         await AppendSupervisorErrorAsync(job.JobId, new InvalidOperationException(error), cancellationToken);
-        return job with
+        var updated = job with
         {
             UpdatedAt = DateTimeOffset.UtcNow,
             LastError = ProjectionSanitizer.ToSummary(error),
             InputQueue = queueStore.CreateSummary(failed.Queue)
         };
+        var failedItem = failed.Item is null ? null : QueueStore.ToSummary(failed.Item);
+        if (failedItem is not null && notificationDispatcher is not null)
+        {
+            await notificationDispatcher.DispatchQueueItemFailedAsync(
+                updated,
+                failedItem,
+                IsChannelEnabled(updated),
+                cancellationToken);
+        }
+
+        return updated;
     }
 
     private async Task<CodexJobRecord> HandleTransientFailureAsync(
@@ -444,8 +468,26 @@ public sealed class CodexJobSupervisor : BackgroundService
             Level = "error",
             Message = failed.LastError ?? "backend_thread_unrecoverable"
         }, cancellationToken);
-        await jobStore.SaveAsync(failed, cancellationToken);
+        await SaveAndNotifyStateChangeAsync(job, failed, cancellationToken);
         return failed;
+    }
+
+    private async Task SaveAndNotifyStateChangeAsync(
+        CodexJobRecord before,
+        CodexJobRecord after,
+        CancellationToken cancellationToken)
+    {
+        await jobStore.SaveAsync(after, cancellationToken);
+        if (notificationDispatcher is null)
+        {
+            return;
+        }
+
+        await notificationDispatcher.DispatchJobStateChangeAsync(
+            before,
+            after,
+            IsChannelEnabled(after),
+            cancellationToken);
     }
 
     private Task AppendSupervisorErrorAsync(
@@ -463,6 +505,22 @@ public sealed class CodexJobSupervisor : BackgroundService
     private static bool ShouldRefresh(JobIndexEntry job) =>
         !CodexJobRecordUpdater.IsTerminal(job.Status)
         || (job.Status == JobState.Completed && job.InputQueue.PendingCount > 0);
+
+    private bool IsChannelEnabled(CodexJobRecord job)
+    {
+        if (string.Equals(job.NotificationMode, NotificationModes.Channel, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.Equals(job.NotificationMode, NotificationModes.Disabled, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return managerOptions?.Profiles.TryGetValue(job.Profile, out var profile) == true
+            && profile.ChannelNotifications.Enabled;
+    }
 
     private static CodexJobRecord ApplyQueueDeliveryStatus(
         CodexJobRecord job,

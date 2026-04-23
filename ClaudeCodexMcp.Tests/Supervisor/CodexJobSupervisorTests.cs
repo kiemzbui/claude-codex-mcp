@@ -5,6 +5,7 @@ using ClaudeCodexMcp.Backend;
 using ClaudeCodexMcp.Configuration;
 using ClaudeCodexMcp.Discovery;
 using ClaudeCodexMcp.Domain;
+using ClaudeCodexMcp.Notifications;
 using ClaudeCodexMcp.Storage;
 using ClaudeCodexMcp.Supervisor;
 using ClaudeCodexMcp.Tools;
@@ -292,6 +293,105 @@ public sealed class CodexJobSupervisorTests
     }
 
     [Fact]
+    public async Task SupervisorEmitsLifecycleNotificationForObservedTerminalState()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync(
+            "job_notify_completed",
+            JobState.Running,
+            threadId: "thread-notify",
+            notificationMode: NotificationModes.Channel);
+        var transport = new RecordingClaudeChannelTransport();
+        var dispatcher = workspace.CreateNotificationDispatcher(transport);
+        var backend = new ScriptedSupervisorBackend();
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = JobState.Completed,
+            BackendIds = new CodexBackendIds { ThreadId = "thread-notify" }
+        });
+
+        await workspace.CreateSupervisor(backend, notificationDispatcher: dispatcher).RefreshActiveJobsOnceAsync();
+
+        var stored = await workspace.JobStore.ReadAsync("job_notify_completed");
+        Assert.Equal(JobState.Completed, stored?.Status);
+        var records = await workspace.NotificationStore.ReadAsync("job_notify_completed");
+        Assert.Contains(records, record =>
+            record.EventName == NotificationEventNames.JobCompleted &&
+            record.DeliveryState == NotificationDeliveryState.Attempted);
+        Assert.Contains(records, record =>
+            record.EventName == NotificationEventNames.JobCompleted &&
+            record.DeliveryState == NotificationDeliveryState.Delivered);
+        Assert.Single(transport.Payloads);
+    }
+
+    [Fact]
+    public async Task SupervisorEmitsQueueItemFailedNotificationWithoutChangingLifecycleState()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync(
+            "job_queue_notify_fail",
+            JobState.Running,
+            threadId: "thread-queue-notify",
+            notificationMode: NotificationModes.Channel);
+        var first = await workspace.QueuePromptAsync(
+            "job_queue_notify_fail",
+            "queued prompt token=must-not-notify",
+            DateTimeOffset.Parse("2026-04-23T12:01:00Z"));
+        var transport = new RecordingClaudeChannelTransport();
+        var dispatcher = workspace.CreateNotificationDispatcher(transport);
+        var backend = new ScriptedSupervisorBackend();
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = JobState.Completed,
+            BackendIds = new CodexBackendIds { ThreadId = "thread-queue-notify" }
+        });
+        backend.EnqueueSendInputException(new InvalidOperationException("queued delivery token=queue-failure-secret failed"));
+
+        await workspace.CreateSupervisor(backend, notificationDispatcher: dispatcher).RefreshActiveJobsOnceAsync();
+
+        var stored = await workspace.JobStore.ReadAsync("job_queue_notify_fail");
+        Assert.Equal(JobState.Completed, stored?.Status);
+        var queue = await workspace.QueueStore.ReadAsync("job_queue_notify_fail");
+        Assert.Equal(QueueItemState.Failed, queue.Items.Single(item => item.QueueItemId == first.QueueItemId).Status);
+        var records = await workspace.NotificationStore.ReadAsync("job_queue_notify_fail");
+        Assert.Contains(records, record => record.EventName == NotificationEventNames.QueueItemFailed);
+        Assert.All(transport.Payloads, payload =>
+        {
+            Assert.DoesNotContain("must-not-notify", payload);
+            Assert.DoesNotContain("queue-failure-secret", payload);
+        });
+    }
+
+    [Fact]
+    public async Task ChannelFailureIsNotLifecycleFailure()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync(
+            "job_channel_fail",
+            JobState.Running,
+            threadId: "thread-channel-fail",
+            notificationMode: NotificationModes.Channel);
+        var dispatcher = workspace.CreateNotificationDispatcher(new RecordingClaudeChannelTransport
+        {
+            Failure = "channel failed"
+        });
+        var backend = new ScriptedSupervisorBackend();
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = JobState.Completed,
+            BackendIds = new CodexBackendIds { ThreadId = "thread-channel-fail" }
+        });
+
+        await workspace.CreateSupervisor(backend, notificationDispatcher: dispatcher).RefreshActiveJobsOnceAsync();
+
+        var stored = await workspace.JobStore.ReadAsync("job_channel_fail");
+        Assert.Equal(JobState.Completed, stored?.Status);
+        var records = await workspace.NotificationStore.ReadAsync("job_channel_fail");
+        Assert.Contains(records, record => record.DeliveryState == NotificationDeliveryState.Failed);
+        Assert.DoesNotContain(records, record => record.EventName == NotificationEventNames.JobFailed);
+    }
+
+    [Fact]
     public async Task SupervisorRestartRecoveryDeliversPendingQueueForCompletedJob()
     {
         using var workspace = SupervisorWorkspace.Create();
@@ -322,6 +422,7 @@ public sealed class CodexJobSupervisorTests
             QueueStore = new QueueStore(Paths);
             JobStore = new JobStore(Paths);
             OutputStore = new OutputStore(Paths);
+            NotificationStore = new NotificationStore(Paths);
         }
 
         public string Root { get; }
@@ -336,6 +437,8 @@ public sealed class CodexJobSupervisorTests
 
         public OutputStore OutputStore { get; }
 
+        public NotificationStore NotificationStore { get; }
+
         public static SupervisorWorkspace Create()
         {
             var root = Path.Combine(Path.GetTempPath(), "claude-codex-mcp-supervisor-tests", Guid.NewGuid().ToString("N"));
@@ -343,7 +446,11 @@ public sealed class CodexJobSupervisorTests
             return new SupervisorWorkspace(root);
         }
 
-        public async Task<CodexJobRecord> SaveJobAsync(string jobId, JobState state, string? threadId)
+        public async Task<CodexJobRecord> SaveJobAsync(
+            string jobId,
+            JobState state,
+            string? threadId,
+            string notificationMode = NotificationModes.Disabled)
         {
             var timestamp = DateTimeOffset.Parse("2026-04-23T12:00:00Z");
             var job = new CodexJobRecord
@@ -365,7 +472,7 @@ public sealed class CodexJobSupervisorTests
                 ServiceTier = "normal",
                 LogPath = Paths.GetRelativeLogPath(jobId),
                 InputQueue = QueueStore.CreateEmptySummary(jobId),
-                NotificationMode = "disabled",
+                NotificationMode = notificationMode,
                 NotificationLogPath = Paths.GetRelativeNotificationLogPath(jobId)
             };
             await JobStore.SaveAsync(job);
@@ -388,7 +495,8 @@ public sealed class CodexJobSupervisorTests
         public CodexJobSupervisor CreateSupervisor(
             ICodexBackend backend,
             CodexJobLockRegistry? locks = null,
-            CodexJobSupervisorOptions? options = null) =>
+            CodexJobSupervisorOptions? options = null,
+            NotificationDispatcher? notificationDispatcher = null) =>
             new(
                 JobStore,
                 QueueStore,
@@ -396,7 +504,8 @@ public sealed class CodexJobSupervisorTests
                 backend,
                 locks ?? new CodexJobLockRegistry(),
                 NullLogger<CodexJobSupervisor>.Instance,
-                options ?? new CodexJobSupervisorOptions { PollInterval = TimeSpan.FromMilliseconds(10) });
+                options ?? new CodexJobSupervisorOptions { PollInterval = TimeSpan.FromMilliseconds(10) },
+                notificationDispatcher);
 
         public CodexToolService CreateToolService(ICodexBackend backend, CodexJobLockRegistry locks)
         {
@@ -431,6 +540,12 @@ public sealed class CodexJobSupervisorTests
                 discovery,
                 locks);
         }
+
+        public NotificationDispatcher CreateNotificationDispatcher(IClaudeChannelTransport transport) =>
+            new(
+                NotificationStore,
+                new ClaudeChannelNotifier(transport),
+                NullLogger<NotificationDispatcher>.Instance);
 
         public void Dispose()
         {
@@ -579,6 +694,23 @@ public sealed class CodexJobSupervisorTests
             ObserveStarted.TrySetResult();
             await ReleaseObserve.Task.WaitAsync(cancellationToken);
             return new CodexBackendStatus { State = JobState.Running, BackendIds = request.BackendIds };
+        }
+    }
+
+    private sealed class RecordingClaudeChannelTransport : IClaudeChannelTransport
+    {
+        public List<string> Payloads { get; } = [];
+
+        public string? Failure { get; init; }
+
+        public Task<ClaudeChannelDeliveryResult> SendAsync(
+            string payloadJson,
+            CancellationToken cancellationToken = default)
+        {
+            Payloads.Add(payloadJson);
+            return Task.FromResult(Failure is null
+                ? ClaudeChannelDeliveryResult.Success()
+                : ClaudeChannelDeliveryResult.Failure(Failure));
         }
     }
 }

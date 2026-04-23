@@ -2,6 +2,7 @@ using ClaudeCodexMcp.Backend;
 using ClaudeCodexMcp.Configuration;
 using ClaudeCodexMcp.Discovery;
 using ClaudeCodexMcp.Domain;
+using ClaudeCodexMcp.Notifications;
 using ClaudeCodexMcp.Storage;
 using ClaudeCodexMcp.Supervisor;
 using ClaudeCodexMcp.Usage;
@@ -22,6 +23,7 @@ public sealed class CodexToolService
     private readonly CodexCapabilityDiscovery discovery;
     private readonly CodexJobLockRegistry jobLocks;
     private readonly UsageReporter usageReporter;
+    private readonly NotificationDispatcher? notificationDispatcher;
 
     public CodexToolService(
         IOptions<ManagerOptions> options,
@@ -75,7 +77,8 @@ public sealed class CodexToolService
         ICodexBackend backend,
         CodexCapabilityDiscovery discovery,
         CodexJobLockRegistry jobLocks,
-        UsageReporter usageReporter)
+        UsageReporter usageReporter,
+        NotificationDispatcher? notificationDispatcher = null)
     {
         this.options = options.Value;
         this.policyValidator = policyValidator;
@@ -86,6 +89,7 @@ public sealed class CodexToolService
         this.discovery = discovery;
         this.jobLocks = jobLocks;
         this.usageReporter = usageReporter;
+        this.notificationDispatcher = notificationDispatcher;
     }
 
     private OutputStore OutputStore => outputStore
@@ -206,6 +210,7 @@ public sealed class CodexToolService
 
             var updated = ApplyBackendStatus(initialJob, start.Status);
             await jobStore.SaveAsync(updated, cancellationToken);
+            await DispatchJobStateChangeAsync(initialJob, updated, cancellationToken);
 
             return new CodexStartTaskResponse
             {
@@ -222,6 +227,7 @@ public sealed class CodexToolService
                 LastError = ProjectionSanitizer.ToSummary(exception.Message)
             };
             await jobStore.SaveAsync(failed, cancellationToken);
+            await DispatchJobStateChangeAsync(initialJob, failed, cancellationToken);
             return new CodexStartTaskResponse
             {
                 Accepted = true,
@@ -262,6 +268,7 @@ public sealed class CodexToolService
 
         if (!IsTerminal(job.Status))
         {
+            var previous = job;
             var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
             {
                 JobId = job.JobId,
@@ -269,6 +276,7 @@ public sealed class CodexToolService
             }, cancellationToken);
             job = CodexJobRecordUpdater.ApplyStatus(job, status);
             await jobStore.SaveAsync(job, cancellationToken);
+            await DispatchJobStateChangeAsync(previous, job, cancellationToken);
         }
 
         return new CodexStatusResponse
@@ -516,6 +524,7 @@ public sealed class CodexToolService
 
         var updated = CodexJobRecordUpdater.ApplyStatus(persistedOptions, status);
         await jobStore.SaveAsync(updated, cancellationToken);
+        await DispatchJobStateChangeAsync(persistedOptions, updated, cancellationToken);
 
         return new CodexSendInputResponse
         {
@@ -694,6 +703,7 @@ public sealed class CodexToolService
         }, cancellationToken);
         var updated = CodexJobRecordUpdater.ApplyStatus(job, status) with { Status = JobState.Cancelled };
         await jobStore.SaveAsync(updated, cancellationToken);
+        await DispatchJobStateChangeAsync(job, updated, cancellationToken);
 
         return new CodexCancelResponse
         {
@@ -889,7 +899,7 @@ public sealed class CodexToolService
         ServiceTier = policy.Options.ServiceTier,
         InputQueue = queueStore.CreateEmptySummary(jobId),
         LogPath = Path.Combine(".codex-manager", "logs", $"{jobId}.jsonl"),
-        NotificationMode = "disabled",
+        NotificationMode = policy.ChannelNotifications.Enabled ? NotificationModes.Channel : NotificationModes.Disabled,
         NotificationLogPath = Path.Combine(".codex-manager", "notifications", $"{jobId}.jsonl")
     };
 
@@ -990,6 +1000,23 @@ public sealed class CodexToolService
         string.IsNullOrWhiteSpace(jobId)
             ? new ToolError("blank_job_id", "A jobId is required.", "jobId")
             : new ToolError("job_not_found", $"Job '{jobId.Trim()}' was not found.", "jobId");
+
+    private async Task DispatchJobStateChangeAsync(
+        CodexJobRecord before,
+        CodexJobRecord after,
+        CancellationToken cancellationToken)
+    {
+        if (notificationDispatcher is null)
+        {
+            return;
+        }
+
+        await notificationDispatcher.DispatchJobStateChangeAsync(
+            before,
+            after,
+            string.Equals(after.NotificationMode, NotificationModes.Channel, StringComparison.OrdinalIgnoreCase),
+            cancellationToken);
+    }
 
     private static CodexProfilePolicySummary ToToolProfileSummary(ProfilePolicySummary summary) => new()
     {
