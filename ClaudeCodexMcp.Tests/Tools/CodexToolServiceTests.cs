@@ -8,6 +8,7 @@ using ClaudeCodexMcp.Tools;
 using ClaudeCodexMcp.Usage;
 using ClaudeCodexMcp.Workflows;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 
 namespace ClaudeCodexMcp.Tests.Tools;
 
@@ -193,8 +194,143 @@ public sealed class CodexToolServiceTests
         var result = await service.ResultAsync(start.Job!.JobId);
 
         Assert.False(result.FullOutputIncluded);
+        Assert.Null(result.FullOutput);
+        Assert.Empty(result.ArtifactRefs);
         Assert.Equal("compact summary", result.Summary);
         Assert.DoesNotContain("FULL_OUTPUT_SECRET", result.Job?.ResultSummary ?? string.Empty);
+    }
+
+    [Fact]
+    public async Task ReadOutputReturnsOffsetsLimitsEndMarkersAndMissingOutput()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var start = await service.StartTaskAsync("implementation", "direct", "Read output", workspace.RepoRoot, "Prompt");
+
+        var missing = await service.ReadOutputAsync(start.Job!.JobId);
+
+        Assert.Contains(missing.Errors, error => error.Code == "output_not_found");
+        Assert.True(missing.EndOfOutput);
+
+        await workspace.OutputStore.AppendAsync(new OutputLogEntry
+        {
+            JobId = start.Job.JobId,
+            ThreadId = "thread-1",
+            TurnId = "turn-1",
+            AgentId = "agent-a",
+            Message = "first"
+        });
+        await workspace.OutputStore.AppendAsync(new OutputLogEntry
+        {
+            JobId = start.Job.JobId,
+            ThreadId = "thread-1",
+            TurnId = "turn-2",
+            AgentId = "agent-a",
+            Message = "second"
+        });
+
+        var firstPage = await service.ReadOutputAsync(
+            start.Job.JobId,
+            threadId: "thread-1",
+            agentId: "agent-a",
+            offset: 0,
+            limit: 1);
+        var secondPage = await service.ReadOutputAsync(
+            start.Job.JobId,
+            threadId: "thread-1",
+            agentId: "agent-a",
+            offset: firstPage.NextOffset,
+            limit: 1,
+            format: "text");
+
+        Assert.False(firstPage.EndOfOutput);
+        Assert.Equal(1, firstPage.NextOffset);
+        Assert.Equal("first", Assert.Single(firstPage.Entries).Message);
+        Assert.True(secondPage.EndOfOutput);
+        Assert.Null(secondPage.NextOffset);
+        Assert.Contains("second", secondPage.Text);
+        Assert.Equal("text", secondPage.Format);
+    }
+
+    [Fact]
+    public async Task ReadOutputUsesBackendFinalOutputWhenLocalLogIsMissing()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var backend = new InspectingBackend(workspace.StateDirectory)
+        {
+            StartStatus = new CodexBackendStatus
+            {
+                State = JobState.Completed,
+                BackendIds = new CodexBackendIds { ThreadId = "thread-complete", TurnId = "turn-complete" }
+            },
+            Output = new CodexBackendOutput
+            {
+                Summary = "done",
+                FinalText = "backend final text"
+            }
+        };
+        var service = workspace.CreateService(backend);
+        var start = await service.StartTaskAsync("implementation", "direct", "Backend output", workspace.RepoRoot, "Prompt");
+
+        var output = await service.ReadOutputAsync(start.Job!.JobId, format: "text");
+
+        Assert.Empty(output.Errors);
+        Assert.Contains("backend final text", output.Text);
+        Assert.Contains(output.ArtifactRefs, artifact => artifact.Kind == "backendThread" && artifact.Ref == "thread-complete");
+    }
+
+    [Fact]
+    public async Task ReadOutputTruncatesBeforeSerializationAndKeepsJsonValid()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var start = await service.StartTaskAsync("implementation", "direct", "Huge output", workspace.RepoRoot, "Prompt");
+        await workspace.OutputStore.AppendAsync(new OutputLogEntry
+        {
+            JobId = start.Job!.JobId,
+            Message = "prefix " + new string('x', OutputResponseLimits.PaginatedChunkBytes * 2)
+        });
+
+        var output = await service.ReadOutputAsync(start.Job.JobId, limit: 10);
+        var json = JsonSerializer.Serialize(output);
+
+        using var document = JsonDocument.Parse(json);
+        Assert.True(output.Truncated);
+        Assert.Contains("[truncated]", Assert.Single(output.Entries).Message);
+        Assert.True(OutputStoreBudget.SerializedByteCount(output) <= OutputResponseLimits.PaginatedChunkBytes);
+        Assert.Equal("prefix ", document.RootElement.GetProperty("Entries")[0].GetProperty("Message").GetString()?.Substring(0, 7));
+    }
+
+    [Fact]
+    public async Task ResultFullIncludesBudgetedOutputTruncationAndArtifactRefs()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var backend = new InspectingBackend(workspace.StateDirectory)
+        {
+            StartStatus = new CodexBackendStatus
+            {
+                State = JobState.Completed,
+                BackendIds = new CodexBackendIds { ThreadId = "thread-full" }
+            },
+            Output = new CodexBackendOutput
+            {
+                Summary = "full summary",
+                FinalText = "full output " + new string('y', OutputResponseLimits.FullBytes * 2)
+            }
+        };
+        var service = workspace.CreateService(backend);
+        var start = await service.StartTaskAsync("implementation", "direct", "Full result", workspace.RepoRoot, "Prompt");
+
+        var result = await service.ResultAsync(start.Job!.JobId, detail: "full");
+        var json = JsonSerializer.Serialize(result);
+
+        using var _ = JsonDocument.Parse(json);
+        Assert.True(result.FullOutputIncluded);
+        Assert.True(result.Truncated);
+        Assert.Contains("[truncated]", result.FullOutput);
+        Assert.Contains(result.ArtifactRefs, artifact => artifact.Kind == "log");
+        Assert.Contains(result.ArtifactRefs, artifact => artifact.Kind == "backendThread" && artifact.Ref == "thread-full");
+        Assert.True(OutputStoreBudget.SerializedByteCount(result) <= OutputResponseLimits.FullBytes);
     }
 
     [Fact]
@@ -365,6 +501,7 @@ public sealed class CodexToolServiceTests
             Paths = new ManagerStatePaths(StateDirectory);
             JobStore = new JobStore(Paths);
             QueueStore = new QueueStore(Paths);
+            OutputStore = new OutputStore(Paths);
             Options = CreateOptions(RepoRoot, allowOverrides);
         }
 
@@ -379,6 +516,8 @@ public sealed class CodexToolServiceTests
         public JobStore JobStore { get; }
 
         public QueueStore QueueStore { get; }
+
+        public OutputStore OutputStore { get; }
 
         public ManagerOptions Options { get; }
 
@@ -402,6 +541,7 @@ public sealed class CodexToolServiceTests
                 policyValidator,
                 JobStore,
                 QueueStore,
+                OutputStore,
                 backend ?? new InspectingBackend(StateDirectory),
                 discovery,
                 new CodexJobLockRegistry(),

@@ -146,7 +146,52 @@ public sealed record CodexResultResponse
 
     public string? Summary { get; init; }
 
+    public string? FullOutput { get; init; }
+
     public bool FullOutputIncluded { get; init; }
+
+    public bool Truncated { get; init; }
+
+    public int? NextOffset { get; init; }
+
+    public string? NextCursor { get; init; }
+
+    public IReadOnlyList<OutputArtifactRef> ArtifactRefs { get; init; } = [];
+
+    public IReadOnlyList<ToolError> Errors { get; init; } = [];
+}
+
+public sealed record CodexReadOutputResponse
+{
+    public string JobId { get; init; } = string.Empty;
+
+    public string? ThreadId { get; init; }
+
+    public string? TurnId { get; init; }
+
+    public string? AgentId { get; init; }
+
+    public int Offset { get; init; }
+
+    public int Limit { get; init; }
+
+    public string Format { get; init; } = "json";
+
+    public IReadOnlyList<OutputLogEntry> Entries { get; init; } = [];
+
+    public string? Text { get; init; }
+
+    public bool Truncated { get; init; }
+
+    public int? NextOffset { get; init; }
+
+    public string? NextCursor { get; init; }
+
+    public bool EndOfOutput { get; init; }
+
+    public string LogRef { get; init; } = string.Empty;
+
+    public IReadOnlyList<OutputArtifactRef> ArtifactRefs { get; init; } = [];
 
     public IReadOnlyList<ToolError> Errors { get; init; } = [];
 }

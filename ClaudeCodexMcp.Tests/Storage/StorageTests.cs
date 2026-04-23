@@ -145,6 +145,62 @@ public sealed class StorageTests
     }
 
     [Fact]
+    public async Task OutputStoreAppliesFiltersOffsetsLimitsAndEndMarkers()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var paths = new ManagerStatePaths(workspace.StateDirectory);
+        var store = new OutputStore(paths);
+
+        await store.AppendAsync(new OutputLogEntry
+        {
+            JobId = "job_filtered",
+            ThreadId = "thread-a",
+            TurnId = "turn-a",
+            AgentId = "agent-a",
+            Message = "first matching"
+        });
+        await store.AppendAsync(new OutputLogEntry
+        {
+            JobId = "job_filtered",
+            ThreadId = "thread-b",
+            TurnId = "turn-b",
+            AgentId = "agent-b",
+            Message = "filtered out"
+        });
+        await store.AppendAsync(new OutputLogEntry
+        {
+            JobId = "job_filtered",
+            ThreadId = "thread-a",
+            TurnId = "turn-c",
+            AgentId = "agent-a",
+            Message = "second matching"
+        });
+
+        var firstPage = await store.ReadAsync(
+            "job_filtered",
+            threadId: "thread-a",
+            turnId: null,
+            agentId: "agent-a",
+            offset: 0,
+            limit: 1);
+        var secondPage = await store.ReadAsync(
+            "job_filtered",
+            threadId: "thread-a",
+            turnId: null,
+            agentId: "agent-a",
+            offset: 1,
+            limit: 1);
+
+        Assert.False(firstPage.EndOfLog);
+        Assert.Equal(1, firstPage.NextOffset);
+        Assert.Equal(2, firstPage.TotalCount);
+        Assert.Equal("first matching", Assert.Single(firstPage.Entries).Message);
+        Assert.True(secondPage.EndOfLog);
+        Assert.Equal(2, secondPage.NextOffset);
+        Assert.Equal("second matching", Assert.Single(secondPage.Entries).Message);
+    }
+
+    [Fact]
     public async Task NotificationStoreAppendsAndReadsJsonlRecords()
     {
         using var workspace = TemporaryStateWorkspace.Create();

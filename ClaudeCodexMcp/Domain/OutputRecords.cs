@@ -32,4 +32,30 @@ public sealed record OutputLogPage
     public int NextOffset { get; init; }
 
     public bool EndOfLog { get; init; }
+
+    public int TotalCount { get; init; }
+}
+
+public static class OutputResponseLimits
+{
+    public const int SummaryBytes = 8 * 1024;
+
+    public const int NormalBytes = 32 * 1024;
+
+    public const int FullBytes = 128 * 1024;
+
+    public const int PaginatedChunkBytes = 64 * 1024;
+
+    public const int AbsoluteHardCapBytes = 256 * 1024;
+
+    public const int ChannelEventBytes = 4 * 1024;
+}
+
+public sealed record OutputArtifactRef
+{
+    public string Kind { get; init; } = string.Empty;
+
+    public string Ref { get; init; } = string.Empty;
+
+    public string? Description { get; init; }
 }

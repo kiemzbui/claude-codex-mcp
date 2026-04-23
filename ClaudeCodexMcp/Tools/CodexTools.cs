@@ -84,6 +84,18 @@ public sealed class CodexTools
         service.ResultAsync(jobId, detail, cancellationToken);
 
     [McpServerTool]
+    public Task<CodexReadOutputResponse> codex_read_output(
+        string? jobId,
+        string? threadId = null,
+        string? turnId = null,
+        string? agentId = null,
+        int? offset = null,
+        int? limit = null,
+        string? format = null,
+        CancellationToken cancellationToken = default) =>
+        service.ReadOutputAsync(jobId, threadId, turnId, agentId, offset, limit, format, cancellationToken);
+
+    [McpServerTool]
     public Task<CodexSendInputResponse> codex_send_input(
         string? jobId,
         string? prompt,

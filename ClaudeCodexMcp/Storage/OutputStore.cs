@@ -30,21 +30,54 @@ public sealed class OutputStore
         int limit = 100,
         CancellationToken cancellationToken = default)
     {
+        return await ReadAsync(
+            jobId,
+            threadId: null,
+            turnId: null,
+            agentId: null,
+            offset,
+            limit,
+            cancellationToken);
+    }
+
+    public async Task<OutputLogPage> ReadAsync(
+        string jobId,
+        string? threadId,
+        string? turnId,
+        string? agentId,
+        int offset = 0,
+        int limit = 100,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(jobId);
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
 
         var entries = await ReadJsonLinesAsync<OutputLogEntry>(paths.GetLogPath(jobId), cancellationToken);
-        var pageEntries = entries.Skip(offset).Take(limit).ToArray();
+        var filtered = entries
+            .Where(entry => Matches(entry.ThreadId, threadId))
+            .Where(entry => Matches(entry.TurnId, turnId))
+            .Where(entry => Matches(entry.AgentId, agentId))
+            .ToArray();
+        var pageEntries = filtered.Skip(offset).Take(limit).ToArray();
         var nextOffset = offset + pageEntries.Length;
         return new OutputLogPage
         {
             Entries = pageEntries,
             Offset = offset,
             NextOffset = nextOffset,
-            EndOfLog = nextOffset >= entries.Count
+            EndOfLog = nextOffset >= filtered.Length,
+            TotalCount = filtered.Length
         };
     }
+
+    public bool Exists(string jobId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(jobId);
+        return File.Exists(paths.GetLogPath(jobId));
+    }
+
+    public string GetRelativeLogRef(string jobId) => paths.GetRelativeLogPath(jobId);
 
     private static async Task AppendJsonLineAsync<T>(string path, T value, CancellationToken cancellationToken)
     {
@@ -88,4 +121,8 @@ public sealed class OutputStore
 
         return values;
     }
+
+    private static bool Matches(string? actual, string? expected) =>
+        string.IsNullOrWhiteSpace(expected)
+        || string.Equals(actual, expected.Trim(), StringComparison.Ordinal);
 }

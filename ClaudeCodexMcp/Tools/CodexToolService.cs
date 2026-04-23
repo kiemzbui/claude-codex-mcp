@@ -17,6 +17,7 @@ public sealed class CodexToolService
     private readonly IProfilePolicyValidator policyValidator;
     private readonly JobStore jobStore;
     private readonly QueueStore queueStore;
+    private readonly OutputStore? outputStore;
     private readonly ICodexBackend backend;
     private readonly CodexCapabilityDiscovery discovery;
     private readonly CodexJobLockRegistry jobLocks;
@@ -35,6 +36,7 @@ public sealed class CodexToolService
             policyValidator,
             jobStore,
             queueStore,
+            outputStore: null,
             backend,
             discovery,
             jobLocks,
@@ -47,6 +49,29 @@ public sealed class CodexToolService
         IProfilePolicyValidator policyValidator,
         JobStore jobStore,
         QueueStore queueStore,
+        OutputStore? outputStore,
+        ICodexBackend backend,
+        CodexCapabilityDiscovery discovery,
+        CodexJobLockRegistry jobLocks)
+        : this(
+            options,
+            policyValidator,
+            jobStore,
+            queueStore,
+            outputStore,
+            backend,
+            discovery,
+            jobLocks,
+            new UsageReporter())
+    {
+    }
+
+    public CodexToolService(
+        IOptions<ManagerOptions> options,
+        IProfilePolicyValidator policyValidator,
+        JobStore jobStore,
+        QueueStore queueStore,
+        OutputStore? outputStore,
         ICodexBackend backend,
         CodexCapabilityDiscovery discovery,
         CodexJobLockRegistry jobLocks,
@@ -56,11 +81,15 @@ public sealed class CodexToolService
         this.policyValidator = policyValidator;
         this.jobStore = jobStore;
         this.queueStore = queueStore;
+        this.outputStore = outputStore;
         this.backend = backend;
         this.discovery = discovery;
         this.jobLocks = jobLocks;
         this.usageReporter = usageReporter;
     }
+
+    private OutputStore OutputStore => outputStore
+        ?? throw new InvalidOperationException("OutputStore is required for output pagination tools.");
 
     public CodexListProfilesResponse ListProfiles()
     {
@@ -267,24 +296,148 @@ public sealed class CodexToolService
             return new CodexResultResponse { Errors = [MissingJobError(jobId)] };
         }
 
-        var includeFull = string.Equals(detail, "full", StringComparison.OrdinalIgnoreCase);
-        if (job.Status == JobState.Completed)
+        var normalizedDetail = string.IsNullOrWhiteSpace(detail)
+            ? "summary"
+            : detail.Trim().ToLowerInvariant();
+        var includeFull = normalizedDetail == "full";
+        var budget = normalizedDetail == "normal"
+            ? OutputResponseLimits.NormalBytes
+            : includeFull ? OutputResponseLimits.FullBytes : OutputResponseLimits.SummaryBytes;
+        var output = await RefreshFinalOutputIfAvailableAsync(job, cancellationToken);
+        job = output.Job;
+
+        var artifactRefs = CreateOutputArtifactRefs(job);
+        string? fullOutput = null;
+        bool truncated = false;
+        int? nextOffset = null;
+        string? nextCursor = null;
+        if (includeFull)
         {
-            var output = await backend.ReadFinalOutputAsync(new CodexBackendOutputRequest
+            fullOutput = output.FinalOutput?.FinalText;
+            if (string.IsNullOrEmpty(fullOutput))
             {
-                JobId = job.JobId,
-                BackendIds = ToBackendIds(job)
-            }, cancellationToken);
-            job = CodexJobRecordUpdater.ApplyOutput(job, output);
-            await jobStore.SaveAsync(job, cancellationToken);
+                var page = await OutputStore.ReadAsync(job.JobId, offset: 0, limit: int.MaxValue, cancellationToken);
+                var pageResponse = OutputStoreBudget.CreateReadOutputResponse(
+                    job.JobId,
+                    threadId: null,
+                    turnId: null,
+                    agentId: null,
+                    requestedOffset: 0,
+                    requestedLimit: int.MaxValue,
+                    format: "text",
+                    page,
+                    job.LogPath,
+                    artifactRefs,
+                    errors: []);
+                fullOutput = pageResponse.Text;
+                truncated = pageResponse.Truncated;
+                nextOffset = pageResponse.NextOffset;
+                nextCursor = pageResponse.NextCursor;
+            }
+            else
+            {
+                fullOutput = OutputStoreBudget.TruncateUtf8(
+                    fullOutput,
+                    OutputResponseLimits.FullBytes,
+                    out truncated);
+                if (truncated)
+                {
+                    nextCursor = "truncated-string-field";
+                }
+            }
         }
 
-        return new CodexResultResponse
+        return OutputStoreBudget.EnforceResultBudget(new CodexResultResponse
         {
             Job = ToCompact(job),
             Summary = job.ResultSummary,
-            FullOutputIncluded = includeFull && false
-        };
+            FullOutput = includeFull ? fullOutput : null,
+            FullOutputIncluded = includeFull && fullOutput is not null,
+            Truncated = truncated,
+            NextOffset = nextOffset,
+            NextCursor = nextCursor,
+            ArtifactRefs = truncated || includeFull ? artifactRefs : []
+        }, budget);
+    }
+
+    public async Task<CodexReadOutputResponse> ReadOutputAsync(
+        string? jobId,
+        string? threadId = null,
+        string? turnId = null,
+        string? agentId = null,
+        int? offset = null,
+        int? limit = null,
+        string? format = null,
+        CancellationToken cancellationToken = default)
+    {
+        var requestedOffset = Math.Max(offset ?? 0, 0);
+        var requestedLimit = Math.Clamp(limit ?? 100, 1, 1000);
+        var normalizedFormat = OutputStoreBudget.NormalizeFormat(format);
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            return new CodexReadOutputResponse
+            {
+                Offset = requestedOffset,
+                Limit = requestedLimit,
+                Format = normalizedFormat,
+                EndOfOutput = true,
+                Errors = [MissingJobError(jobId)]
+            };
+        }
+
+        if (!OutputStoreBudget.IsSupportedFormat(normalizedFormat))
+        {
+            return new CodexReadOutputResponse
+            {
+                JobId = jobId.Trim(),
+                Offset = requestedOffset,
+                Limit = requestedLimit,
+                Format = normalizedFormat,
+                EndOfOutput = true,
+                Errors = [new ToolError("invalid_output_format", "format must be json, text, or jsonl.", "format")]
+            };
+        }
+
+        await using var lease = await jobLocks.AcquireAsync(jobId.Trim(), cancellationToken);
+        var job = await ReadJobOrNullAsync(jobId, cancellationToken);
+        if (job is null)
+        {
+            return new CodexReadOutputResponse
+            {
+                JobId = jobId.Trim(),
+                Offset = requestedOffset,
+                Limit = requestedLimit,
+                Format = normalizedFormat,
+                EndOfOutput = true,
+                Errors = [MissingJobError(jobId)]
+            };
+        }
+
+        job = (await RefreshFinalOutputIfAvailableAsync(job, cancellationToken)).Job;
+        var page = await OutputStore.ReadAsync(
+            job.JobId,
+            threadId,
+            turnId,
+            agentId,
+            requestedOffset,
+            requestedLimit,
+            cancellationToken);
+        IReadOnlyList<ToolError> errors = !OutputStore.Exists(job.JobId) || page.TotalCount == 0
+            ? [new ToolError("output_not_found", "No output entries matched the requested job and filters.", "jobId")]
+            : [];
+
+        return OutputStoreBudget.CreateReadOutputResponse(
+            job.JobId,
+            threadId,
+            turnId,
+            agentId,
+            requestedOffset,
+            requestedLimit,
+            normalizedFormat,
+            page,
+            job.LogPath,
+            CreateOutputArtifactRefs(job),
+            errors);
     }
 
     public async Task<CodexSendInputResponse> SendInputAsync(
@@ -646,6 +799,66 @@ public sealed class CodexToolService
         return activeCount >= policy.MaxConcurrentJobs
             ? new ToolError("max_concurrent_jobs_exceeded", "The selected profile has reached its active job limit.", "profile")
             : null;
+    }
+
+    private async Task<(CodexJobRecord Job, CodexBackendOutput? FinalOutput)> RefreshFinalOutputIfAvailableAsync(
+        CodexJobRecord job,
+        CancellationToken cancellationToken)
+    {
+        if (job.Status != JobState.Completed || !backend.Capabilities.SupportsReadFinalOutput)
+        {
+            return (job, null);
+        }
+
+        var output = await backend.ReadFinalOutputAsync(new CodexBackendOutputRequest
+        {
+            JobId = job.JobId,
+            BackendIds = ToBackendIds(job)
+        }, cancellationToken);
+        var updated = CodexJobRecordUpdater.ApplyOutput(job, output);
+        await jobStore.SaveAsync(updated, cancellationToken);
+
+        if (outputStore is not null &&
+            !OutputStore.Exists(updated.JobId) &&
+            !string.IsNullOrWhiteSpace(output.FinalText))
+        {
+            await OutputStore.AppendAsync(new OutputLogEntry
+            {
+                JobId = updated.JobId,
+                ThreadId = updated.CodexThreadId,
+                TurnId = updated.CodexTurnId,
+                Source = "backend_final_output",
+                Level = "info",
+                Message = output.FinalText
+            }, cancellationToken);
+        }
+
+        return (updated, output);
+    }
+
+    private static IReadOnlyList<OutputArtifactRef> CreateOutputArtifactRefs(CodexJobRecord job)
+    {
+        var refs = new List<OutputArtifactRef>
+        {
+            new()
+            {
+                Kind = "log",
+                Ref = job.LogPath,
+                Description = "Local JSONL output log for paginated reads."
+            }
+        };
+
+        if (!string.IsNullOrWhiteSpace(job.CodexThreadId))
+        {
+            refs.Add(new OutputArtifactRef
+            {
+                Kind = "backendThread",
+                Ref = job.CodexThreadId,
+                Description = "Backend thread id for history retrieval when supported."
+            });
+        }
+
+        return refs;
     }
 
     private CodexJobRecord CreateInitialJob(
