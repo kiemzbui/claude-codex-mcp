@@ -146,6 +146,15 @@ public sealed record AppServerThreadIdParams
     public required string ThreadId { get; init; }
 }
 
+public sealed record AppServerTurnInterruptParams
+{
+    [JsonPropertyName("threadId")]
+    public required string ThreadId { get; init; }
+
+    [JsonPropertyName("turnId")]
+    public required string TurnId { get; init; }
+}
+
 public sealed record AppServerUserInput
 {
     [JsonPropertyName("type")]
