@@ -24,4 +24,3 @@ public sealed class PolicyValidationResult<T>
     public static PolicyValidationResult<T> Failure(IEnumerable<PolicyValidationError> errors) =>
         new(default, errors.ToArray());
 }
-

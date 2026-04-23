@@ -28,4 +28,3 @@ public sealed class CanonicalWorkflowTests
         Assert.False(rejected);
     }
 }
-

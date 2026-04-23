@@ -54,4 +54,3 @@ public sealed record ProfilePolicySummary(
     bool AllowFastModeOverride,
     bool RequireFastMode,
     string DefaultServiceTier);
-

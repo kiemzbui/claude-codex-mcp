@@ -8,4 +8,3 @@ public interface IProfilePolicyValidator
 
     PolicyValidationResult<ProfilePolicySummary> GetProfileSummary(string? profileName);
 }
-

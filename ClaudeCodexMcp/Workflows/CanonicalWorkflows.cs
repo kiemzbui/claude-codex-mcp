@@ -36,4 +36,3 @@ public static class CanonicalWorkflows
         return false;
     }
 }
-

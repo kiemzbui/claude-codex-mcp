@@ -36,4 +36,3 @@ public static class CodexEfforts
         return false;
     }
 }
-

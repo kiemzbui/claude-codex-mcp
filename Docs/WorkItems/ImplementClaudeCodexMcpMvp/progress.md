@@ -3,7 +3,7 @@
 ## Stage Status
 
 - [x] Stage 1 - Scaffold, Options, And Logging
-- [ ] Stage 2 - Profile And Workflow Validation
+- [x] Stage 2 - Profile And Workflow Validation
 - [ ] Stage 3 - Durable Job, Queue, Output, And Notification Storage
 - [ ] Stage 4 - App-Server Feasibility Gate
 - [ ] Manual Smoke Gate A - App-Server Feasibility Review
@@ -22,9 +22,9 @@
 
 ## Current Checkpoint
 
-- Latest completed point: Stage 1 - Scaffold, Options, And Logging.
-- Active reality: root solution and projects are scaffolded; host options and stderr/file logging are in place.
-- Next executable step: Stage 2 - Profile And Workflow Validation.
+- Latest completed point: Stage 2 - Profile And Workflow Validation.
+- Active reality: profile/workflow policy models, validation logic, canonical workflows, and focused tests are in place.
+- Next executable step: Stage 3 - Durable Job, Queue, Output, And Notification Storage.
 - Next executor command: `$orchestrate execute Docs/WorkItems/ImplementClaudeCodexMcpMvp`.
 
 ## Checkpoint Notes
@@ -33,5 +33,6 @@
 - Runtime state must be created under root `.codex-manager/`.
 - Implementation must use the root layout `ClaudeCodexMcp.sln`, `ClaudeCodexMcp/ClaudeCodexMcp.csproj`, and `ClaudeCodexMcp.Tests/ClaudeCodexMcp.Tests.csproj`.
 - Stage 1 verification passed with `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln`, and stdout-discipline checks.
+- Stage 2 verification passed with `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln`, Roslyn diagnostics, and whitespace checks after global-usings adjustments.
 - Manual Smoke Gate A must be completed before production app-server-dependent stages continue.
 - Manual Smoke Gate B must be completed before production channel behavior is enabled by default.

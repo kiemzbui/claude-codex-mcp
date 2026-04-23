@@ -340,4 +340,3 @@ public sealed class ProfilePolicyValidatorTests
     private static string DescribeErrors(IReadOnlyList<PolicyValidationError> errors) =>
         string.Join(", ", errors.Select(error => $"{error.Code}:{error.Field}"));
 }
-
