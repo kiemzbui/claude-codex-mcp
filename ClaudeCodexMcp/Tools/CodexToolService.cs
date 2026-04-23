@@ -340,6 +340,144 @@ public sealed class CodexToolService
         };
     }
 
+    public async Task<CodexQueueInputResponse> QueueInputAsync(
+        string? jobId,
+        string? prompt,
+        string? title = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return new CodexQueueInputResponse
+            {
+                Errors = [new ToolError("blank_prompt", "A queued prompt is required.", "prompt")]
+            };
+        }
+
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            return new CodexQueueInputResponse { Errors = [MissingJobError(jobId)] };
+        }
+
+        var normalizedJobId = jobId.Trim();
+        await using var lease = await jobLocks.AcquireAsync(normalizedJobId, cancellationToken);
+        var job = await ReadJobOrNullAsync(normalizedJobId, cancellationToken);
+        if (job is null)
+        {
+            return new CodexQueueInputResponse { Errors = [MissingJobError(jobId)] };
+        }
+
+        if (IsTerminal(job.Status))
+        {
+            return new CodexQueueInputResponse
+            {
+                Errors = [new ToolError("terminal_job", "Cannot queue input for a terminal job.", "jobId")]
+            };
+        }
+
+        var item = await queueStore.AddAsync(
+            job.JobId,
+            prompt.Trim(),
+            title,
+            cancellationToken: cancellationToken);
+        var queue = await queueStore.ReadAsync(job.JobId, cancellationToken);
+        var summary = queueStore.CreateSummary(queue);
+        var updated = job with
+        {
+            UpdatedAt = DateTimeOffset.UtcNow,
+            InputQueue = summary
+        };
+        await jobStore.SaveAsync(updated, cancellationToken);
+        var queuePosition = summary.Items
+            .Where(queueItem => queueItem.Status == QueueItemState.Pending)
+            .OrderBy(queueItem => queueItem.CreatedAt)
+            .ThenBy(queueItem => queueItem.QueueItemId, StringComparer.Ordinal)
+            .TakeWhile(queueItem => !string.Equals(queueItem.QueueItemId, item.QueueItemId, StringComparison.Ordinal))
+            .Count() + 1;
+
+        return new CodexQueueInputResponse
+        {
+            Accepted = true,
+            QueueItem = QueueStore.ToSummary(item),
+            QueuePosition = queuePosition,
+            Job = ToCompact(updated)
+        };
+    }
+
+    public async Task<CodexCancelQueuedInputResponse> CancelQueuedInputAsync(
+        string? jobId,
+        string? queueItemId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            return new CodexCancelQueuedInputResponse { Errors = [MissingJobError(jobId)] };
+        }
+
+        if (string.IsNullOrWhiteSpace(queueItemId))
+        {
+            return new CodexCancelQueuedInputResponse
+            {
+                Errors = [new ToolError("blank_queue_item_id", "A queueItemId is required.", "queueItemId")]
+            };
+        }
+
+        var normalizedJobId = jobId.Trim();
+        var normalizedQueueItemId = queueItemId.Trim();
+        await using var lease = await jobLocks.AcquireAsync(normalizedJobId, cancellationToken);
+        var job = await ReadJobOrNullAsync(normalizedJobId, cancellationToken);
+        if (job is null)
+        {
+            return new CodexCancelQueuedInputResponse { Errors = [MissingJobError(jobId)] };
+        }
+
+        var queue = await queueStore.ReadAsync(job.JobId, cancellationToken);
+        var currentItem = queue.Items.SingleOrDefault(item =>
+            string.Equals(item.QueueItemId, normalizedQueueItemId, StringComparison.Ordinal));
+        if (currentItem is null)
+        {
+            return new CodexCancelQueuedInputResponse
+            {
+                Job = ToCompact(job),
+                Errors = [new ToolError("queue_item_not_found", $"Queue item '{normalizedQueueItemId}' was not found.", "queueItemId")]
+            };
+        }
+
+        if (currentItem.Status != QueueItemState.Pending)
+        {
+            return new CodexCancelQueuedInputResponse
+            {
+                Job = ToCompact(job),
+                QueueItem = QueueStore.ToSummary(currentItem),
+                Errors =
+                [
+                    new ToolError(
+                        "queue_item_not_pending",
+                        "Only pending queue items can be cancelled.",
+                        "queueItemId")
+                ]
+            };
+        }
+
+        var (updatedQueue, updatedItem) = await queueStore.CancelPendingAsync(
+            job.JobId,
+            normalizedQueueItemId,
+            cancellationToken: cancellationToken);
+        var updated = job with
+        {
+            UpdatedAt = DateTimeOffset.UtcNow,
+            InputQueue = queueStore.CreateSummary(updatedQueue)
+        };
+        await jobStore.SaveAsync(updated, cancellationToken);
+
+        return new CodexCancelQueuedInputResponse
+        {
+            Accepted = true,
+            QueueItem = updatedItem is null ? null : QueueStore.ToSummary(updatedItem),
+            Job = ToCompact(updated)
+        };
+    }
+
     public async Task<CodexCancelResponse> CancelAsync(
         string? jobId,
         CancellationToken cancellationToken = default)

@@ -12,7 +12,7 @@
 - [x] Stage 6 - Backend Abstraction And Minimal Lifecycle
 - [x] Stage 7 - Core MCP Tool Surface
 - [x] Stage 8 - Background Supervisor
-- [ ] Stage 9 - Queued Input And Cancellation
+- [x] Stage 9 - Queued Input And Cancellation
 - [ ] Stage 10 - Usage And Statusline
 - [ ] Stage 11 - Full Output Pagination
 - [ ] Stage 12 - Channel Notifications
@@ -22,9 +22,9 @@
 
 ## Current Checkpoint
 
-- Latest completed point: Stage 8 - Background Supervisor.
+- Latest completed point: Stage 9 - Queued Input And Cancellation.
 - Active reality: app-server-first backend behavior is approved for continuation based on `app_server_feasibility.md`; CLI fallback remains required for degraded environments. Channel protocol prerequisites are present, so production channel notification work should still be implemented later as best-effort and fallback-aware, disabled by default until Manual Smoke Gate C verifies live delivery with a real `claude --channels server:claude-codex-mcp` receiver.
-- Next executable step: Stage 9 - Queued Input And Cancellation.
+- Next executable step: Stage 10 - Usage And Statusline.
 - Next executor command: `$orchestrate execute Docs/WorkItems/ImplementClaudeCodexMcpMvp`.
 
 ## Checkpoint Notes
@@ -42,3 +42,4 @@
 - Stage 6 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.Tests\ClaudeCodexMcp.Tests.csproj --nologo --filter FullyQualifiedName~ClaudeCodexMcp.Tests.Backend`, `dotnet test ClaudeCodexMcp.sln --nologo`, and Stage 6 scope checks.
 - Stage 7 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, focused `ClaudeCodexMcp.Tests.Tools` and `ClaudeCodexMcp.Tests.Discovery` checks, and Stage 7 scope checks.
 - Stage 8 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, focused `ClaudeCodexMcp.Tests.Supervisor` and `ClaudeCodexMcp.Tests.Tools` checks, and Stage 8 scope checks.
+- Stage 9 verification passed with `dotnet build ClaudeCodexMcp.sln --no-restore --nologo`, `dotnet test ClaudeCodexMcp.sln --no-restore --nologo`, focused `ClaudeCodexMcp.Tests.Tools`, `ClaudeCodexMcp.Tests.Storage`, and `ClaudeCodexMcp.Tests.Supervisor` checks, `git diff --check`, and Stage 9 scope checks.

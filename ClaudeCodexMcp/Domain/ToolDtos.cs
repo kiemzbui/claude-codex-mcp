@@ -160,6 +160,30 @@ public sealed record CodexSendInputResponse
     public IReadOnlyList<ToolError> Errors { get; init; } = [];
 }
 
+public sealed record CodexQueueInputResponse
+{
+    public bool Accepted { get; init; }
+
+    public QueueItemSummary? QueueItem { get; init; }
+
+    public int QueuePosition { get; init; }
+
+    public CodexJobCompactResponse? Job { get; init; }
+
+    public IReadOnlyList<ToolError> Errors { get; init; } = [];
+}
+
+public sealed record CodexCancelQueuedInputResponse
+{
+    public bool Accepted { get; init; }
+
+    public QueueItemSummary? QueueItem { get; init; }
+
+    public CodexJobCompactResponse? Job { get; init; }
+
+    public IReadOnlyList<ToolError> Errors { get; init; } = [];
+}
+
 public sealed record CodexCancelResponse
 {
     public bool Accepted { get; init; }

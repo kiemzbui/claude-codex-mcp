@@ -81,6 +81,91 @@ public sealed class QueueStore
             .ToArray();
     }
 
+    public async Task<(QueueRecord Queue, QueueItemRecord? Item)> MarkDeliveryAttemptAsync(
+        string jobId,
+        string queueItemId,
+        DateTimeOffset? attemptedAt = null,
+        CancellationToken cancellationToken = default)
+    {
+        var now = attemptedAt ?? DateTimeOffset.UtcNow;
+        return await UpdateItemAsync(
+            jobId,
+            queueItemId,
+            item => item with
+            {
+                UpdatedAt = now,
+                DeliveryAttemptCount = item.DeliveryAttemptCount + 1,
+                LastError = null
+            },
+            now,
+            cancellationToken);
+    }
+
+    public async Task<(QueueRecord Queue, QueueItemRecord? Item)> MarkDeliveredAsync(
+        string jobId,
+        string queueItemId,
+        DateTimeOffset? deliveredAt = null,
+        CancellationToken cancellationToken = default)
+    {
+        var now = deliveredAt ?? DateTimeOffset.UtcNow;
+        return await UpdateItemAsync(
+            jobId,
+            queueItemId,
+            item => item with
+            {
+                UpdatedAt = now,
+                Status = QueueItemState.Delivered,
+                DeliveredAt = now,
+                LastError = null
+            },
+            now,
+            cancellationToken);
+    }
+
+    public async Task<(QueueRecord Queue, QueueItemRecord? Item)> MarkFailedAsync(
+        string jobId,
+        string queueItemId,
+        string error,
+        DateTimeOffset? failedAt = null,
+        CancellationToken cancellationToken = default)
+    {
+        var now = failedAt ?? DateTimeOffset.UtcNow;
+        return await UpdateItemAsync(
+            jobId,
+            queueItemId,
+            item => item with
+            {
+                UpdatedAt = now,
+                Status = QueueItemState.Failed,
+                LastError = ProjectionSanitizer.ToSummary(error)
+            },
+            now,
+            cancellationToken);
+    }
+
+    public async Task<(QueueRecord Queue, QueueItemRecord? Item)> CancelPendingAsync(
+        string jobId,
+        string queueItemId,
+        DateTimeOffset? cancelledAt = null,
+        CancellationToken cancellationToken = default)
+    {
+        var now = cancelledAt ?? DateTimeOffset.UtcNow;
+        return await UpdateItemAsync(
+            jobId,
+            queueItemId,
+            item => item.Status == QueueItemState.Pending
+                ? item with
+                {
+                    UpdatedAt = now,
+                    Status = QueueItemState.Cancelled,
+                    CancelledAt = now,
+                    LastError = null
+                }
+                : item,
+            now,
+            cancellationToken);
+    }
+
     public JobQueueSummary CreateSummary(QueueRecord record)
     {
         var ordered = record.Items
@@ -121,4 +206,43 @@ public sealed class QueueStore
         CancelledAt = item.CancelledAt,
         LastError = ProjectionSanitizer.ToOptionalSummary(item.LastError)
     };
+
+    private async Task<(QueueRecord Queue, QueueItemRecord? Item)> UpdateItemAsync(
+        string jobId,
+        string queueItemId,
+        Func<QueueItemRecord, QueueItemRecord> update,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(jobId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(queueItemId);
+
+        var record = await ReadAsync(jobId, cancellationToken);
+        QueueItemRecord? updatedItem = null;
+        var updatedItems = record.Items
+            .Select(item =>
+            {
+                if (!string.Equals(item.QueueItemId, queueItemId, StringComparison.Ordinal))
+                {
+                    return item;
+                }
+
+                updatedItem = update(item);
+                return updatedItem;
+            })
+            .ToArray();
+
+        if (updatedItem is null)
+        {
+            return (record, null);
+        }
+
+        var updatedRecord = record with
+        {
+            UpdatedAt = updatedAt,
+            Items = updatedItems
+        };
+        await SaveAsync(updatedRecord, cancellationToken);
+        return (updatedRecord, updatedItem);
+    }
 }

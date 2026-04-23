@@ -94,6 +94,21 @@ public sealed class CodexTools
         service.SendInputAsync(jobId, prompt, model, effort, fastMode, cancellationToken);
 
     [McpServerTool]
+    public Task<CodexQueueInputResponse> codex_queue_input(
+        string? jobId,
+        string? prompt,
+        string? title = null,
+        CancellationToken cancellationToken = default) =>
+        service.QueueInputAsync(jobId, prompt, title, cancellationToken);
+
+    [McpServerTool]
+    public Task<CodexCancelQueuedInputResponse> codex_cancel_queued_input(
+        string? jobId,
+        string? queueItemId,
+        CancellationToken cancellationToken = default) =>
+        service.CancelQueuedInputAsync(jobId, queueItemId, cancellationToken);
+
+    [McpServerTool]
     public Task<CodexCancelResponse> codex_cancel(
         string? jobId,
         CancellationToken cancellationToken = default) =>

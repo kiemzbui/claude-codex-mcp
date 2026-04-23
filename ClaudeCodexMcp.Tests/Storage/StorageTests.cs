@@ -88,6 +88,35 @@ public sealed class StorageTests
     }
 
     [Fact]
+    public async Task QueueStorePersistsDeliveryAttemptsFailuresCancellationsAndCounts()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var paths = new ManagerStatePaths(workspace.StateDirectory);
+        var store = new QueueStore(paths);
+        var delivered = await store.AddAsync("job_queue_counts", "deliver this", "Deliver");
+        var failed = await store.AddAsync("job_queue_counts", "fail this", "Fail");
+        var cancelled = await store.AddAsync("job_queue_counts", "cancel this", "Cancel");
+
+        var attempt = await store.MarkDeliveryAttemptAsync("job_queue_counts", delivered.QueueItemId);
+        await store.MarkDeliveredAsync("job_queue_counts", delivered.QueueItemId);
+        await store.MarkFailedAsync("job_queue_counts", failed.QueueItemId, "backend rejected queued input");
+        await store.CancelPendingAsync("job_queue_counts", cancelled.QueueItemId);
+        var queue = await store.ReadAsync("job_queue_counts");
+        var summary = store.CreateSummary(queue);
+
+        Assert.Equal(1, attempt.Item?.DeliveryAttemptCount);
+        Assert.Equal(QueueItemState.Delivered, queue.Items.Single(item => item.QueueItemId == delivered.QueueItemId).Status);
+        Assert.Equal(QueueItemState.Failed, queue.Items.Single(item => item.QueueItemId == failed.QueueItemId).Status);
+        Assert.Contains("backend rejected", queue.Items.Single(item => item.QueueItemId == failed.QueueItemId).LastError);
+        Assert.Equal(QueueItemState.Cancelled, queue.Items.Single(item => item.QueueItemId == cancelled.QueueItemId).Status);
+        Assert.NotNull(queue.Items.Single(item => item.QueueItemId == cancelled.QueueItemId).CancelledAt);
+        Assert.Equal(0, summary.PendingCount);
+        Assert.Equal(1, summary.DeliveredCount);
+        Assert.Equal(1, summary.FailedCount);
+        Assert.Equal(1, summary.CancelledCount);
+    }
+
+    [Fact]
     public async Task OutputStoreAppendsAndReadsJsonlEntries()
     {
         using var workspace = TemporaryStateWorkspace.Create();

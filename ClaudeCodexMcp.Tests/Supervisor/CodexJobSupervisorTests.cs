@@ -207,6 +207,110 @@ public sealed class CodexJobSupervisorTests
         Assert.Contains("thread no longer exists", stored?.LastError);
     }
 
+    [Fact]
+    public async Task QueuedInputIsDeliveredInFifoOrderAfterEachSuccessfulCompletion()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync("job_queue_fifo", JobState.Running, threadId: "thread-fifo");
+        var first = await workspace.QueuePromptAsync(
+            "job_queue_fifo",
+            "first queued prompt",
+            DateTimeOffset.Parse("2026-04-23T12:01:00Z"));
+        var second = await workspace.QueuePromptAsync(
+            "job_queue_fifo",
+            "second queued prompt",
+            DateTimeOffset.Parse("2026-04-23T12:02:00Z"));
+        var backend = new ScriptedSupervisorBackend();
+        backend.EnqueueObserve(new CodexBackendStatus { State = JobState.Completed, BackendIds = new CodexBackendIds { ThreadId = "thread-fifo" } });
+        backend.EnqueueObserve(new CodexBackendStatus { State = JobState.Completed, BackendIds = new CodexBackendIds { ThreadId = "thread-fifo" } });
+        var supervisor = workspace.CreateSupervisor(backend);
+
+        await supervisor.RefreshActiveJobsOnceAsync();
+        await supervisor.RefreshActiveJobsOnceAsync();
+
+        Assert.Equal(["first queued prompt", "second queued prompt"], backend.SendInputRequests.Select(request => request.Prompt).ToArray());
+        var queue = await workspace.QueueStore.ReadAsync("job_queue_fifo");
+        Assert.Equal(QueueItemState.Delivered, queue.Items.Single(item => item.QueueItemId == first.QueueItemId).Status);
+        Assert.Equal(QueueItemState.Delivered, queue.Items.Single(item => item.QueueItemId == second.QueueItemId).Status);
+        Assert.All(queue.Items, item => Assert.Equal(1, item.DeliveryAttemptCount));
+        var stored = await workspace.JobStore.ReadAsync("job_queue_fifo");
+        Assert.Equal(0, stored?.InputQueue.PendingCount);
+        Assert.Equal(2, stored?.InputQueue.DeliveredCount);
+    }
+
+    [Theory]
+    [InlineData(JobState.Failed)]
+    [InlineData(JobState.Cancelled)]
+    [InlineData(JobState.WaitingForInput)]
+    public async Task QueuedInputStaysPendingWhenActiveTurnDoesNotCompleteSuccessfully(JobState nextState)
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync($"job_pending_{nextState}", JobState.Running, threadId: $"thread-{nextState}");
+        var item = await workspace.QueuePromptAsync($"job_pending_{nextState}", "queued prompt", DateTimeOffset.Parse("2026-04-23T12:01:00Z"));
+        var backend = new ScriptedSupervisorBackend();
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = nextState,
+            BackendIds = new CodexBackendIds { ThreadId = $"thread-{nextState}" },
+            WaitingForInput = nextState == JobState.WaitingForInput
+                ? new WaitingForInputRecord { RequestId = "clarify", Prompt = "Need clarification." }
+                : null
+        });
+
+        await workspace.CreateSupervisor(backend).RefreshActiveJobsOnceAsync();
+
+        Assert.Empty(backend.SendInputRequests);
+        var queue = await workspace.QueueStore.ReadAsync($"job_pending_{nextState}");
+        Assert.Equal(QueueItemState.Pending, queue.Items.Single(itemRecord => itemRecord.QueueItemId == item.QueueItemId).Status);
+        var stored = await workspace.JobStore.ReadAsync($"job_pending_{nextState}");
+        Assert.Equal(nextState, stored?.Status);
+        Assert.Equal(1, stored?.InputQueue.PendingCount);
+    }
+
+    [Fact]
+    public async Task QueuedDeliveryFailureIsPersistedAndLaterItemsRemainPending()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync("job_queue_fail", JobState.Running, threadId: "thread-fail");
+        var first = await workspace.QueuePromptAsync("job_queue_fail", "first queued prompt", DateTimeOffset.Parse("2026-04-23T12:01:00Z"));
+        var second = await workspace.QueuePromptAsync("job_queue_fail", "second queued prompt", DateTimeOffset.Parse("2026-04-23T12:02:00Z"));
+        var backend = new ScriptedSupervisorBackend();
+        backend.EnqueueObserve(new CodexBackendStatus { State = JobState.Completed, BackendIds = new CodexBackendIds { ThreadId = "thread-fail" } });
+        backend.EnqueueSendInputException(new InvalidOperationException("send input failed"));
+
+        await workspace.CreateSupervisor(backend).RefreshActiveJobsOnceAsync();
+
+        var queue = await workspace.QueueStore.ReadAsync("job_queue_fail");
+        var failed = queue.Items.Single(item => item.QueueItemId == first.QueueItemId);
+        Assert.Equal(QueueItemState.Failed, failed.Status);
+        Assert.Equal(1, failed.DeliveryAttemptCount);
+        Assert.Contains("send input failed", failed.LastError);
+        Assert.Equal(QueueItemState.Pending, queue.Items.Single(item => item.QueueItemId == second.QueueItemId).Status);
+        var stored = await workspace.JobStore.ReadAsync("job_queue_fail");
+        Assert.Equal(1, stored?.InputQueue.FailedCount);
+        Assert.Equal(1, stored?.InputQueue.PendingCount);
+    }
+
+    [Fact]
+    public async Task SupervisorRestartRecoveryDeliversPendingQueueForCompletedJob()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync("job_queue_restart", JobState.Completed, threadId: "thread-restart");
+        await workspace.QueuePromptAsync("job_queue_restart", "queued after completed turn", DateTimeOffset.Parse("2026-04-23T12:01:00Z"));
+        File.Delete(workspace.Paths.JobIndexPath);
+        var backend = new ScriptedSupervisorBackend();
+
+        var result = await workspace.CreateSupervisor(backend).RecoverActiveJobsAsync();
+
+        Assert.Equal(1, result.ActiveJobsScanned);
+        Assert.Empty(backend.ResumeRequests);
+        Assert.Single(backend.SendInputRequests);
+        Assert.Equal("queued after completed turn", backend.SendInputRequests.Single().Prompt);
+        var stored = await workspace.JobStore.ReadAsync("job_queue_restart");
+        Assert.Equal(JobState.Running, stored?.Status);
+        Assert.Equal(1, stored?.InputQueue.DeliveredCount);
+    }
+
     private sealed class SupervisorWorkspace : IDisposable
     {
         private SupervisorWorkspace(string root)
@@ -266,6 +370,19 @@ public sealed class CodexJobSupervisorTests
             };
             await JobStore.SaveAsync(job);
             return job;
+        }
+
+        public async Task<QueueItemRecord> QueuePromptAsync(string jobId, string prompt, DateTimeOffset createdAt)
+        {
+            var item = await QueueStore.AddAsync(jobId, prompt, createdAt: createdAt);
+            var job = await JobStore.ReadAsync(jobId);
+            if (job is not null)
+            {
+                var queue = await QueueStore.ReadAsync(jobId);
+                await JobStore.SaveAsync(job with { InputQueue = QueueStore.CreateSummary(queue) });
+            }
+
+            return item;
         }
 
         public CodexJobSupervisor CreateSupervisor(
@@ -329,6 +446,7 @@ public sealed class CodexJobSupervisorTests
         private readonly ConcurrentQueue<object> observeResults = new();
         private readonly ConcurrentQueue<object> pollResults = new();
         private readonly ConcurrentQueue<object> resumeResults = new();
+        private readonly ConcurrentQueue<object> sendInputResults = new();
 
         public ScriptedSupervisorBackend(CodexBackendCapabilities? capabilities = null)
         {
@@ -357,6 +475,8 @@ public sealed class CodexJobSupervisorTests
 
         public List<CodexBackendResumeRequest> ResumeRequests { get; } = [];
 
+        public List<CodexBackendSendInputRequest> SendInputRequests { get; } = [];
+
         public CodexBackendOutput Output { get; init; } = new();
 
         public CodexBackendUsageSnapshot Usage { get; init; } = new();
@@ -368,6 +488,10 @@ public sealed class CodexJobSupervisorTests
         public void EnqueueResume(CodexBackendStatus status) => resumeResults.Enqueue(status);
 
         public void EnqueueObserveException(Exception exception) => observeResults.Enqueue(exception);
+
+        public void EnqueueSendInput(CodexBackendStatus status) => sendInputResults.Enqueue(status);
+
+        public void EnqueueSendInputException(Exception exception) => sendInputResults.Enqueue(exception);
 
         public Task<CodexBackendStartResult> StartAsync(
             CodexBackendStartRequest request,
@@ -392,8 +516,11 @@ public sealed class CodexJobSupervisorTests
 
         public Task<CodexBackendStatus> SendInputAsync(
             CodexBackendSendInputRequest request,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(new CodexBackendStatus { State = JobState.Running, BackendIds = request.BackendIds });
+            CancellationToken cancellationToken = default)
+        {
+            SendInputRequests.Add(request);
+            return ResultFromQueueAsync(sendInputResults, request.BackendIds);
+        }
 
         public virtual Task<CodexBackendStatus> CancelAsync(
             CodexBackendCancelRequest request,

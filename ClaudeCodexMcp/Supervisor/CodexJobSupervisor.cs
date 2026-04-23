@@ -39,7 +39,7 @@ public sealed class CodexJobSupervisor : BackgroundService
     {
         var index = await jobStore.RebuildIndexAsync(cancellationToken);
         var activeJobs = index.Jobs
-            .Where(job => !CodexJobRecordUpdater.IsTerminal(job.Status))
+            .Where(ShouldRefresh)
             .ToArray();
 
         var updated = 0;
@@ -71,7 +71,7 @@ public sealed class CodexJobSupervisor : BackgroundService
     {
         var index = await jobStore.ReadIndexAsync(cancellationToken);
         var activeJobs = index.Jobs
-            .Where(job => !CodexJobRecordUpdater.IsTerminal(job.Status))
+            .Where(ShouldRefresh)
             .ToArray();
 
         var updated = 0;
@@ -103,9 +103,21 @@ public sealed class CodexJobSupervisor : BackgroundService
     {
         await using var lease = await jobLocks.AcquireAsync(jobId, cancellationToken);
         var job = await jobStore.ReadAsync(jobId, cancellationToken);
-        if (job is null || CodexJobRecordUpdater.IsTerminal(job.Status))
+        if (job is null)
         {
             return job;
+        }
+
+        if (CodexJobRecordUpdater.IsTerminal(job.Status))
+        {
+            if (job.Status != JobState.Completed)
+            {
+                return job;
+            }
+
+            var updated = await TryDeliverNextQueuedInputLockedAsync(job, cancellationToken);
+            await jobStore.SaveAsync(updated, cancellationToken);
+            return updated;
         }
 
         return await ObserveOrPollLockedAsync(job, cancellationToken);
@@ -138,9 +150,21 @@ public sealed class CodexJobSupervisor : BackgroundService
     {
         await using var lease = await jobLocks.AcquireAsync(jobId, cancellationToken);
         var job = await jobStore.ReadAsync(jobId, cancellationToken);
-        if (job is null || CodexJobRecordUpdater.IsTerminal(job.Status))
+        if (job is null)
         {
             return job;
+        }
+
+        if (CodexJobRecordUpdater.IsTerminal(job.Status))
+        {
+            if (job.Status != JobState.Completed)
+            {
+                return job;
+            }
+
+            var updated = await TryDeliverNextQueuedInputLockedAsync(job, cancellationToken);
+            await jobStore.SaveAsync(updated, cancellationToken);
+            return updated;
         }
 
         if (string.IsNullOrWhiteSpace(job.CodexThreadId))
@@ -166,6 +190,7 @@ public sealed class CodexJobSupervisor : BackgroundService
             transientFailures.Remove(job.JobId);
             var updated = CodexJobRecordUpdater.ApplyStatus(job, status);
             updated = await EnrichLockedAsync(updated, cancellationToken);
+            updated = await TryDeliverNextQueuedInputLockedAsync(updated, cancellationToken);
             await jobStore.SaveAsync(updated, cancellationToken);
             return updated;
         }
@@ -213,6 +238,7 @@ public sealed class CodexJobSupervisor : BackgroundService
             transientFailures.Remove(job.JobId);
             var updated = CodexJobRecordUpdater.ApplyStatus(job, status);
             updated = await EnrichLockedAsync(updated, cancellationToken);
+            updated = await TryDeliverNextQueuedInputLockedAsync(updated, cancellationToken);
             await jobStore.SaveAsync(updated, cancellationToken);
             return updated;
         }
@@ -273,6 +299,112 @@ public sealed class CodexJobSupervisor : BackgroundService
         return job with { InputQueue = queueStore.CreateSummary(queue) };
     }
 
+    private async Task<CodexJobRecord> TryDeliverNextQueuedInputLockedAsync(
+        CodexJobRecord job,
+        CancellationToken cancellationToken)
+    {
+        if (job.Status != JobState.Completed)
+        {
+            return job;
+        }
+
+        var queue = await queueStore.ReadAsync(job.JobId, cancellationToken);
+        var pending = queue.Items
+            .Where(item => item.Status == QueueItemState.Pending)
+            .OrderBy(item => item.CreatedAt)
+            .ThenBy(item => item.QueueItemId, StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (pending is null)
+        {
+            return job with { InputQueue = queueStore.CreateSummary(queue) };
+        }
+
+        if (!backend.Capabilities.SupportsSendInput)
+        {
+            var failed = await MarkQueueDeliveryFailedAsync(
+                job,
+                pending,
+                "backend does not support queued input delivery",
+                cancellationToken);
+            return failed;
+        }
+
+        var attempt = await queueStore.MarkDeliveryAttemptAsync(
+            job.JobId,
+            pending.QueueItemId,
+            cancellationToken: cancellationToken);
+        var attemptedItem = attempt.Item ?? pending;
+        await outputStore.AppendAsync(new OutputLogEntry
+        {
+            JobId = job.JobId,
+            ThreadId = job.CodexThreadId,
+            TurnId = job.CodexTurnId,
+            Source = "queue",
+            Level = "info",
+            Message = $"delivery attempt {attemptedItem.DeliveryAttemptCount} for queued input {attemptedItem.QueueItemId}"
+        }, cancellationToken);
+
+        try
+        {
+            var status = await backend.SendInputAsync(new CodexBackendSendInputRequest
+            {
+                JobId = job.JobId,
+                BackendIds = CodexJobRecordUpdater.ToBackendIds(job),
+                Prompt = attemptedItem.Prompt,
+                Options = new CodexBackendDispatchOptions
+                {
+                    Model = job.Model,
+                    Effort = job.Effort,
+                    FastMode = job.FastMode,
+                    ServiceTier = job.ServiceTier ?? "normal"
+                },
+                LaunchPolicy = new CodexBackendLaunchPolicy()
+            }, cancellationToken);
+            var delivered = await queueStore.MarkDeliveredAsync(
+                job.JobId,
+                attemptedItem.QueueItemId,
+                cancellationToken: cancellationToken);
+            var updated = ApplyQueueDeliveryStatus(job, status) with
+            {
+                InputQueue = queueStore.CreateSummary(delivered.Queue)
+            };
+            await outputStore.AppendAsync(new OutputLogEntry
+            {
+                JobId = job.JobId,
+                ThreadId = updated.CodexThreadId,
+                TurnId = updated.CodexTurnId,
+                Source = "queue",
+                Level = "info",
+                Message = $"delivered queued input {attemptedItem.QueueItemId}"
+            }, cancellationToken);
+            return updated;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return await MarkQueueDeliveryFailedAsync(job, attemptedItem, exception.Message, cancellationToken);
+        }
+    }
+
+    private async Task<CodexJobRecord> MarkQueueDeliveryFailedAsync(
+        CodexJobRecord job,
+        QueueItemRecord item,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        var failed = await queueStore.MarkFailedAsync(
+            job.JobId,
+            item.QueueItemId,
+            error,
+            cancellationToken: cancellationToken);
+        await AppendSupervisorErrorAsync(job.JobId, new InvalidOperationException(error), cancellationToken);
+        return job with
+        {
+            UpdatedAt = DateTimeOffset.UtcNow,
+            LastError = ProjectionSanitizer.ToSummary(error),
+            InputQueue = queueStore.CreateSummary(failed.Queue)
+        };
+    }
+
     private async Task<CodexJobRecord> HandleTransientFailureAsync(
         CodexJobRecord job,
         Exception exception,
@@ -327,4 +459,32 @@ public sealed class CodexJobSupervisor : BackgroundService
             Level = "warning",
             Message = ProjectionSanitizer.ToSummary(exception.Message)
         }, cancellationToken);
+
+    private static bool ShouldRefresh(JobIndexEntry job) =>
+        !CodexJobRecordUpdater.IsTerminal(job.Status)
+        || (job.Status == JobState.Completed && job.InputQueue.PendingCount > 0);
+
+    private static CodexJobRecord ApplyQueueDeliveryStatus(
+        CodexJobRecord job,
+        CodexBackendStatus status)
+    {
+        var nextState = status.WaitingForInput is not null
+            ? JobState.WaitingForInput
+            : status.State;
+
+        return job with
+        {
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Status = nextState,
+            CodexThreadId = status.BackendIds.ThreadId ?? job.CodexThreadId,
+            CodexTurnId = status.BackendIds.TurnId ?? job.CodexTurnId,
+            CodexSessionId = status.BackendIds.SessionId ?? job.CodexSessionId,
+            WaitingForInput = nextState == JobState.WaitingForInput ? status.WaitingForInput : null,
+            ResultSummary = ProjectionSanitizer.ToOptionalSummary(status.ResultSummary ?? job.ResultSummary, 2048),
+            ChangedFiles = status.ChangedFiles.Count > 0 ? status.ChangedFiles : job.ChangedFiles,
+            TestSummary = ProjectionSanitizer.ToOptionalSummary(status.TestSummary ?? job.TestSummary, 2048),
+            UsageSnapshot = status.UsageSnapshot ?? job.UsageSnapshot,
+            LastError = ProjectionSanitizer.ToOptionalSummary(status.LastError)
+        };
+    }
 }

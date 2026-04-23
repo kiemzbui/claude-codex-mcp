@@ -196,6 +196,80 @@ public sealed class CodexToolServiceTests
         Assert.DoesNotContain("FULL_OUTPUT_SECRET", result.Job?.ResultSummary ?? string.Empty);
     }
 
+    [Fact]
+    public async Task QueueInputPersistsPromptReportsPositionAndQueueCounts()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var start = await service.StartTaskAsync("implementation", "direct", "Queue", workspace.RepoRoot, "Prompt");
+
+        var first = await service.QueueInputAsync(start.Job!.JobId, "first queued prompt secret=QUEUE_BODY", "First");
+        var second = await service.QueueInputAsync(start.Job.JobId, "second queued prompt", "Second");
+
+        Assert.True(first.Accepted);
+        Assert.True(second.Accepted);
+        Assert.Equal(1, first.QueuePosition);
+        Assert.Equal(2, second.QueuePosition);
+        Assert.Equal(2, second.Job?.InputQueue.PendingCount);
+        Assert.Equal(first.QueueItem?.QueueItemId, second.Job?.InputQueue.NextQueueItemId);
+        var queue = await workspace.QueueStore.ReadAsync(start.Job.JobId);
+        Assert.Equal("first queued prompt secret=QUEUE_BODY", queue.Items.First().Prompt);
+        var stored = await workspace.JobStore.ReadAsync(start.Job.JobId);
+        Assert.Equal(2, stored?.InputQueue.PendingCount);
+        Assert.DoesNotContain("QUEUE_BODY", stored?.InputQueue.Items.First().PromptSummary ?? string.Empty);
+    }
+
+    [Fact]
+    public async Task CancelQueuedInputCancelsPendingOnlyAndDoesNotCancelActiveJob()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var backend = new InspectingBackend(workspace.StateDirectory);
+        var service = workspace.CreateService(backend);
+        var start = await service.StartTaskAsync("implementation", "direct", "Cancel queue", workspace.RepoRoot, "Prompt");
+        var queued = await service.QueueInputAsync(start.Job!.JobId, "queued prompt");
+
+        var cancelled = await service.CancelQueuedInputAsync(start.Job.JobId, queued.QueueItem!.QueueItemId);
+
+        Assert.True(cancelled.Accepted);
+        Assert.Empty(backend.CancelRequests);
+        Assert.Equal(JobState.Running, cancelled.Job?.Status);
+        Assert.Equal(1, cancelled.Job?.InputQueue.CancelledCount);
+        Assert.Equal(0, cancelled.Job?.InputQueue.PendingCount);
+        var stored = await workspace.QueueStore.ReadAsync(start.Job.JobId);
+        Assert.Equal(QueueItemState.Cancelled, stored.Items.Single().Status);
+    }
+
+    [Theory]
+    [InlineData(QueueItemState.Delivered)]
+    [InlineData(QueueItemState.Failed)]
+    [InlineData(QueueItemState.Cancelled)]
+    public async Task CancelQueuedInputRejectsNonPendingItems(QueueItemState state)
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var start = await service.StartTaskAsync("implementation", "direct", $"Reject {state}", workspace.RepoRoot, "Prompt");
+        var queued = await service.QueueInputAsync(start.Job!.JobId, "queued prompt");
+
+        if (state == QueueItemState.Delivered)
+        {
+            await workspace.QueueStore.MarkDeliveredAsync(start.Job.JobId, queued.QueueItem!.QueueItemId);
+        }
+        else if (state == QueueItemState.Failed)
+        {
+            await workspace.QueueStore.MarkFailedAsync(start.Job.JobId, queued.QueueItem!.QueueItemId, "delivery failed");
+        }
+        else
+        {
+            await workspace.QueueStore.CancelPendingAsync(start.Job.JobId, queued.QueueItem!.QueueItemId);
+        }
+
+        var rejected = await service.CancelQueuedInputAsync(start.Job.JobId, queued.QueueItem!.QueueItemId);
+
+        Assert.False(rejected.Accepted);
+        Assert.Contains(rejected.Errors, error => error.Code == "queue_item_not_pending");
+        Assert.Equal(state, rejected.QueueItem?.Status);
+    }
+
     private sealed class TemporaryToolWorkspace : IDisposable
     {
         private TemporaryToolWorkspace(string root, bool allowOverrides)
@@ -320,6 +394,8 @@ public sealed class CodexToolServiceTests
 
         public List<CodexBackendSendInputRequest> SendInputRequests { get; } = [];
 
+        public List<CodexBackendCancelRequest> CancelRequests { get; } = [];
+
         public bool SawDurableJobBeforeStart { get; private set; }
 
         public CodexBackendStatus StartStatus { get; init; } = new()
@@ -373,12 +449,15 @@ public sealed class CodexToolServiceTests
 
         public Task<CodexBackendStatus> CancelAsync(
             CodexBackendCancelRequest request,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(new CodexBackendStatus
+            CancellationToken cancellationToken = default)
+        {
+            CancelRequests.Add(request);
+            return Task.FromResult(new CodexBackendStatus
             {
                 State = JobState.Cancelled,
                 BackendIds = request.BackendIds
             });
+        }
 
         public Task<CodexBackendOutput> ReadFinalOutputAsync(
             CodexBackendOutputRequest request,
