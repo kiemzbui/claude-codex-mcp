@@ -20,6 +20,7 @@ public sealed class CodexToolService
     private readonly QueueStore queueStore;
     private readonly OutputStore? outputStore;
     private readonly ICodexBackend backend;
+    private readonly ICodexBackendSelector? backendSelector;
     private readonly CodexCapabilityDiscovery discovery;
     private readonly CodexJobLockRegistry jobLocks;
     private readonly UsageReporter usageReporter;
@@ -78,7 +79,8 @@ public sealed class CodexToolService
         CodexCapabilityDiscovery discovery,
         CodexJobLockRegistry jobLocks,
         UsageReporter usageReporter,
-        NotificationDispatcher? notificationDispatcher = null)
+        NotificationDispatcher? notificationDispatcher = null,
+        ICodexBackendSelector? backendSelector = null)
     {
         this.options = options.Value;
         this.policyValidator = policyValidator;
@@ -86,6 +88,7 @@ public sealed class CodexToolService
         this.queueStore = queueStore;
         this.outputStore = outputStore;
         this.backend = backend;
+        this.backendSelector = backendSelector;
         this.discovery = discovery;
         this.jobLocks = jobLocks;
         this.usageReporter = usageReporter;
@@ -192,11 +195,12 @@ public sealed class CodexToolService
         var now = DateTimeOffset.UtcNow;
         var jobId = $"job_{now:yyyyMMddHHmmss}_{Guid.NewGuid():N}";
         var initialJob = CreateInitialJob(jobId, validation.Value, prompt!, now);
+        var selectedBackend = SelectBackend(validation.Value);
         await jobStore.SaveAsync(initialJob, cancellationToken);
 
         try
         {
-            var start = await backend.StartAsync(new CodexBackendStartRequest
+            var start = await selectedBackend.StartAsync(new CodexBackendStartRequest
             {
                 JobId = jobId,
                 Title = validation.Value.Title,
@@ -268,12 +272,28 @@ public sealed class CodexToolService
 
         if (!IsTerminal(job.Status))
         {
+            var selectedBackend = SelectBackend(job);
+            if (!selectedBackend.Capabilities.SupportsObserveStatus &&
+                !selectedBackend.Capabilities.SupportsStatusPolling)
+            {
+                return new CodexStatusResponse
+                {
+                    Job = ToCompact(job),
+                    WaitRequested = wait,
+                    WaitTimeoutSeconds = waitTimeout,
+                    Errors = [UnsupportedCapabilityError(selectedBackend, CodexBackendCapabilityNames.ObserveStatus)]
+                };
+            }
+
             var previous = job;
-            var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+            var request = new CodexBackendObserveRequest
             {
                 JobId = job.JobId,
                 BackendIds = ToBackendIds(job)
-            }, cancellationToken);
+            };
+            var status = selectedBackend.Capabilities.SupportsObserveStatus
+                ? await selectedBackend.ObserveStatusAsync(request, cancellationToken)
+                : await selectedBackend.PollStatusAsync(request, cancellationToken);
             job = CodexJobRecordUpdater.ApplyStatus(job, status);
             await jobStore.SaveAsync(job, cancellationToken);
             await DispatchJobStateChangeAsync(previous, job, cancellationToken);
@@ -311,7 +331,7 @@ public sealed class CodexToolService
         var budget = normalizedDetail == "normal"
             ? OutputResponseLimits.NormalBytes
             : includeFull ? OutputResponseLimits.FullBytes : OutputResponseLimits.SummaryBytes;
-        var output = await RefreshFinalOutputIfAvailableAsync(job, cancellationToken);
+        var output = await RefreshFinalOutputIfAvailableAsync(job, SelectBackend(job), cancellationToken);
         job = output.Job;
 
         var artifactRefs = CreateOutputArtifactRefs(job);
@@ -428,7 +448,7 @@ public sealed class CodexToolService
             };
         }
 
-        job = (await RefreshFinalOutputIfAvailableAsync(job, cancellationToken)).Job;
+        job = (await RefreshFinalOutputIfAvailableAsync(job, SelectBackend(job), cancellationToken)).Job;
         var page = await OutputStore.ReadAsync(
             job.JobId,
             threadId,
@@ -503,6 +523,16 @@ public sealed class CodexToolService
         }
 
         var selected = validation.Value.Options;
+        var selectedBackend = SelectBackend(job);
+        if (!selectedBackend.Capabilities.SupportsSendInput)
+        {
+            return new CodexSendInputResponse
+            {
+                Job = ToCompact(job),
+                Errors = [UnsupportedCapabilityError(selectedBackend, CodexBackendCapabilityNames.SendInput)]
+            };
+        }
+
         var persistedOptions = job with
         {
             UpdatedAt = DateTimeOffset.UtcNow,
@@ -513,7 +543,7 @@ public sealed class CodexToolService
         };
         await jobStore.SaveAsync(persistedOptions, cancellationToken);
 
-        var status = await backend.SendInputAsync(new CodexBackendSendInputRequest
+        var status = await selectedBackend.SendInputAsync(new CodexBackendSendInputRequest
         {
             JobId = job.JobId,
             BackendIds = ToBackendIds(persistedOptions),
@@ -696,7 +726,17 @@ public sealed class CodexToolService
             };
         }
 
-        var status = await backend.CancelAsync(new CodexBackendCancelRequest
+        var selectedBackend = SelectBackend(job);
+        if (!selectedBackend.Capabilities.SupportsCancel)
+        {
+            return new CodexCancelResponse
+            {
+                Job = ToCompact(job),
+                Errors = [UnsupportedCapabilityError(selectedBackend, CodexBackendCapabilityNames.Cancel)]
+            };
+        }
+
+        var status = await selectedBackend.CancelAsync(new CodexBackendCancelRequest
         {
             JobId = job.JobId,
             BackendIds = ToBackendIds(job)
@@ -749,13 +789,14 @@ public sealed class CodexToolService
         }
 
         var errors = new List<ToolError>();
+        var selectedBackend = SelectBackend(job);
         if (refresh &&
-            backend.Capabilities.SupportsReadUsage &&
+            selectedBackend.Capabilities.SupportsReadUsage &&
             !string.IsNullOrWhiteSpace(job.CodexThreadId))
         {
             try
             {
-                var usageSnapshot = await backend.ReadUsageAsync(new CodexBackendUsageRequest
+                var usageSnapshot = await selectedBackend.ReadUsageAsync(new CodexBackendUsageRequest
                 {
                     JobId = job.JobId,
                     BackendIds = ToBackendIds(job)
@@ -820,14 +861,15 @@ public sealed class CodexToolService
 
     private async Task<(CodexJobRecord Job, CodexBackendOutput? FinalOutput)> RefreshFinalOutputIfAvailableAsync(
         CodexJobRecord job,
+        ICodexBackend selectedBackend,
         CancellationToken cancellationToken)
     {
-        if (job.Status != JobState.Completed || !backend.Capabilities.SupportsReadFinalOutput)
+        if (job.Status != JobState.Completed || !selectedBackend.Capabilities.SupportsReadFinalOutput)
         {
             return (job, null);
         }
 
-        var output = await backend.ReadFinalOutputAsync(new CodexBackendOutputRequest
+        var output = await selectedBackend.ReadFinalOutputAsync(new CodexBackendOutputRequest
         {
             JobId = job.JobId,
             BackendIds = ToBackendIds(job)
@@ -852,6 +894,18 @@ public sealed class CodexToolService
 
         return (updated, output);
     }
+
+    private ICodexBackend SelectBackend(ValidatedDispatchPolicy policy) =>
+        backendSelector?.SelectForPolicy(policy) ?? backend;
+
+    private ICodexBackend SelectBackend(CodexJobRecord job) =>
+        backendSelector?.SelectForJob(job) ?? backend;
+
+    private static ToolError UnsupportedCapabilityError(ICodexBackend selectedBackend, string capability) =>
+        new(
+            "backend_capability_unsupported",
+            $"Backend '{selectedBackend.Capabilities.BackendKind}' does not support {capability}.",
+            null);
 
     private static IReadOnlyList<OutputArtifactRef> CreateOutputArtifactRefs(CodexJobRecord job)
     {
@@ -942,6 +996,9 @@ public sealed class CodexToolService
         CodexTurnId = status.BackendIds.TurnId ?? job.CodexTurnId,
         CodexSessionId = status.BackendIds.SessionId ?? job.CodexSessionId,
         WaitingForInput = status.WaitingForInput,
+        ResultSummary = ProjectionSanitizer.ToOptionalSummary(status.ResultSummary ?? job.ResultSummary, 2048),
+        ChangedFiles = status.ChangedFiles.Count > 0 ? status.ChangedFiles : job.ChangedFiles,
+        TestSummary = ProjectionSanitizer.ToOptionalSummary(status.TestSummary ?? job.TestSummary, 2048),
         UsageSnapshot = status.UsageSnapshot ?? job.UsageSnapshot,
         LastError = ProjectionSanitizer.ToOptionalSummary(status.LastError)
     };

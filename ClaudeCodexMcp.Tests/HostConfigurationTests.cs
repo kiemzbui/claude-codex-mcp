@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using ClaudeCodexMcp;
+using ClaudeCodexMcp.Backend;
 using ClaudeCodexMcp.Configuration;
+using ClaudeCodexMcp.Tools;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -60,6 +62,8 @@ public sealed class HostConfigurationTests
             Assert.Equal("default", profile.Key);
             Assert.Equal(tempRoot, profile.Value.Repo);
             Assert.Equal(1, profile.Value.MaxConcurrentJobs);
+            Assert.NotNull(host.Services.GetRequiredService<ICodexBackendSelector>());
+            Assert.NotNull(host.Services.GetRequiredService<CodexToolService>());
 
             var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("smoke");
             logger.LogInformation("stage one smoke log");

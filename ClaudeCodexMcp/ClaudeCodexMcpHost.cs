@@ -66,7 +66,10 @@ public static class ClaudeCodexMcpHost
         builder.Services.AddSingleton<NotificationDispatcher>();
         builder.Services.AddSingleton<CodexJobSupervisorOptions>();
         builder.Services.AddSingleton<IAppServerJsonRpcClientFactory, CodexAppServerProcessClientFactory>();
-        builder.Services.AddSingleton<ICodexBackend, CodexAppServerBackend>();
+        builder.Services.AddSingleton<CodexAppServerBackend>();
+        builder.Services.AddSingleton(serviceProvider => new CodexCliBackend(serviceProvider.GetRequiredService<OutputStore>()));
+        builder.Services.AddSingleton<ICodexBackendSelector, CodexProfileBackendSelector>();
+        builder.Services.AddSingleton<ICodexBackend>(serviceProvider => serviceProvider.GetRequiredService<CodexAppServerBackend>());
         builder.Services.AddSingleton<CodexJobSupervisor>();
         builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<CodexJobSupervisor>());
         builder.Services.AddSingleton<CodexToolService>();

@@ -542,9 +542,68 @@ public sealed class CodexToolServiceTests
         Assert.Equal(start.Job.Statusline, result.Job?.Statusline);
     }
 
+    [Fact]
+    public async Task ProfileSelectedCliFallbackRoutesToolDispatchOnlyWhenProfileRequestsIt()
+    {
+        using var cliWorkspace = TemporaryToolWorkspace.Create(backendName: CodexBackendNames.Cli);
+        var cliAppBackend = new InspectingBackend(cliWorkspace.StateDirectory, CodexBackendNames.AppServer);
+        var cliFallbackBackend = new InspectingBackend(cliWorkspace.StateDirectory, CodexBackendNames.Cli)
+        {
+            StartStatus = new CodexBackendStatus
+            {
+                State = JobState.Completed,
+                BackendIds = new CodexBackendIds { SessionId = "cli:job" },
+                ResultSummary = "cli fallback completed"
+            },
+            Output = new CodexBackendOutput
+            {
+                Summary = "cli final output",
+                FinalText = "cli final output"
+            }
+        };
+        var cliService = cliWorkspace.CreateService(
+            cliAppBackend,
+            new TestBackendSelector(cliWorkspace.Options, cliAppBackend, cliFallbackBackend));
+
+        var cliStart = await cliService.StartTaskAsync(
+            "implementation",
+            "direct",
+            "CLI fallback",
+            cliWorkspace.RepoRoot,
+            "Prompt");
+        var cliResult = await cliService.ResultAsync(cliStart.Job!.JobId);
+        var cliUsage = await cliService.UsageAsync(cliStart.Job.JobId);
+
+        Assert.True(cliStart.Accepted);
+        Assert.Equal(JobState.Completed, cliStart.Job.Status);
+        Assert.Equal("cli fallback completed", cliStart.Job.ResultSummary);
+        Assert.Single(cliFallbackBackend.StartRequests);
+        Assert.Empty(cliAppBackend.StartRequests);
+        Assert.Equal("cli final output", cliResult.Summary);
+        Assert.Equal(UsageReporter.UnknownStatusline, cliUsage.Statusline);
+
+        using var appWorkspace = TemporaryToolWorkspace.Create(backendName: CodexBackendNames.AppServer);
+        var appBackend = new InspectingBackend(appWorkspace.StateDirectory, CodexBackendNames.AppServer);
+        var disallowedCliBackend = new InspectingBackend(appWorkspace.StateDirectory, CodexBackendNames.Cli);
+        var appService = appWorkspace.CreateService(
+            appBackend,
+            new TestBackendSelector(appWorkspace.Options, appBackend, disallowedCliBackend));
+
+        var appStart = await appService.StartTaskAsync(
+            "implementation",
+            "direct",
+            "App server",
+            appWorkspace.RepoRoot,
+            "Prompt");
+
+        Assert.True(appStart.Accepted);
+        Assert.Single(appBackend.StartRequests);
+        Assert.Empty(disallowedCliBackend.StartRequests);
+    }
+
     private sealed class TemporaryToolWorkspace : IDisposable
     {
-        private TemporaryToolWorkspace(string root, bool allowOverrides)
+        private TemporaryToolWorkspace(string root, bool allowOverrides, string backendName)
         {
             Root = root;
             RepoRoot = Path.Combine(root, "repo");
@@ -554,7 +613,7 @@ public sealed class CodexToolServiceTests
             JobStore = new JobStore(Paths);
             QueueStore = new QueueStore(Paths);
             OutputStore = new OutputStore(Paths);
-            Options = CreateOptions(RepoRoot, allowOverrides);
+            Options = CreateOptions(RepoRoot, allowOverrides, backendName);
         }
 
         public string Root { get; }
@@ -573,14 +632,16 @@ public sealed class CodexToolServiceTests
 
         public ManagerOptions Options { get; }
 
-        public static TemporaryToolWorkspace Create(bool allowOverrides = false)
+        public static TemporaryToolWorkspace Create(bool allowOverrides = false, string backendName = "fake")
         {
             var root = Path.Combine(Path.GetTempPath(), "claude-codex-mcp-tool-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            return new TemporaryToolWorkspace(root, allowOverrides);
+            return new TemporaryToolWorkspace(root, allowOverrides, backendName);
         }
 
-        public CodexToolService CreateService(ICodexBackend? backend = null)
+        public CodexToolService CreateService(
+            ICodexBackend? backend = null,
+            ICodexBackendSelector? backendSelector = null)
         {
             var options = Microsoft.Extensions.Options.Options.Create(Options);
             var policyValidator = new ProfilePolicyValidator(options);
@@ -597,7 +658,8 @@ public sealed class CodexToolServiceTests
                 backend ?? new InspectingBackend(StateDirectory),
                 discovery,
                 new CodexJobLockRegistry(),
-                new UsageReporter());
+                new UsageReporter(),
+                backendSelector: backendSelector);
         }
 
         public void Dispose()
@@ -608,14 +670,14 @@ public sealed class CodexToolServiceTests
             }
         }
 
-        private static ManagerOptions CreateOptions(string repoRoot, bool allowOverrides)
+        private static ManagerOptions CreateOptions(string repoRoot, bool allowOverrides, string backendName)
         {
             var profile = new ProfileOptions
             {
                 Repo = repoRoot,
                 AllowedRepos = [repoRoot],
                 TaskPrefix = "Use repo instructions.",
-                Backend = "fake",
+                Backend = backendName,
                 ReadOnly = true,
                 Permissions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
@@ -648,24 +710,25 @@ public sealed class CodexToolServiceTests
     {
         private readonly string stateDirectory;
 
-        public InspectingBackend(string stateDirectory)
+        public InspectingBackend(string stateDirectory, string backendKind = CodexBackendNames.Fake)
         {
             this.stateDirectory = stateDirectory;
+            Capabilities = new CodexBackendCapabilities
+            {
+                BackendId = backendKind,
+                BackendKind = backendKind,
+                SupportsStart = true,
+                SupportsObserveStatus = true,
+                SupportsStatusPolling = true,
+                SupportsSendInput = true,
+                SupportsCancel = true,
+                SupportsReadFinalOutput = true,
+                SupportsReadUsage = true,
+                SupportsResume = true
+            };
         }
 
-        public CodexBackendCapabilities Capabilities { get; } = new()
-        {
-            BackendId = "fake",
-            BackendKind = "fake",
-            SupportsStart = true,
-            SupportsObserveStatus = true,
-            SupportsStatusPolling = true,
-            SupportsSendInput = true,
-            SupportsCancel = true,
-            SupportsReadFinalOutput = true,
-            SupportsReadUsage = true,
-            SupportsResume = true
-        };
+        public CodexBackendCapabilities Capabilities { get; }
 
         public List<CodexBackendStartRequest> StartRequests { get; } = [];
 
@@ -756,5 +819,33 @@ public sealed class CodexToolServiceTests
                 State = JobState.Running,
                 BackendIds = request.BackendIds
             });
+    }
+
+    private sealed class TestBackendSelector : ICodexBackendSelector
+    {
+        private readonly ManagerOptions options;
+        private readonly ICodexBackend appServerBackend;
+        private readonly ICodexBackend cliBackend;
+
+        public TestBackendSelector(
+            ManagerOptions options,
+            ICodexBackend appServerBackend,
+            ICodexBackend cliBackend)
+        {
+            this.options = options;
+            this.appServerBackend = appServerBackend;
+            this.cliBackend = cliBackend;
+        }
+
+        public ICodexBackend SelectForPolicy(ValidatedDispatchPolicy policy) =>
+            CodexCliBackendSelection.IsCliAllowedByProfile(policy.Backend)
+                ? cliBackend
+                : appServerBackend;
+
+        public ICodexBackend SelectForJob(CodexJobRecord job) =>
+            options.Profiles.TryGetValue(job.Profile, out var profile) &&
+            CodexCliBackendSelection.IsCliAllowedByProfile(profile.Backend)
+                ? cliBackend
+                : appServerBackend;
     }
 }
