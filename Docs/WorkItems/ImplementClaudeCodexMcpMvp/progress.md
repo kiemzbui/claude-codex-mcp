@@ -4,7 +4,7 @@
 
 - [x] Stage 1 - Scaffold, Options, And Logging
 - [x] Stage 2 - Profile And Workflow Validation
-- [ ] Stage 3 - Durable Job, Queue, Output, And Notification Storage
+- [x] Stage 3 - Durable Job, Queue, Output, And Notification Storage
 - [ ] Stage 4 - App-Server Feasibility Gate
 - [ ] Manual Smoke Gate A - App-Server Feasibility Review
 - [ ] Stage 5 - Channel Feasibility Gate
@@ -22,9 +22,9 @@
 
 ## Current Checkpoint
 
-- Latest completed point: Stage 2 - Profile And Workflow Validation.
-- Active reality: profile/workflow policy models, validation logic, canonical workflows, and focused tests are in place.
-- Next executable step: Stage 3 - Durable Job, Queue, Output, And Notification Storage.
+- Latest completed point: Stage 3 - Durable Job, Queue, Output, And Notification Storage.
+- Active reality: durable job, queue, output, notification, and discovery-cache storage primitives are in place with focused storage tests.
+- Next executable step: Stage 4 - App-Server Feasibility Gate.
 - Next executor command: `$orchestrate execute Docs/WorkItems/ImplementClaudeCodexMcpMvp`.
 
 ## Checkpoint Notes
@@ -34,5 +34,6 @@
 - Implementation must use the root layout `ClaudeCodexMcp.sln`, `ClaudeCodexMcp/ClaudeCodexMcp.csproj`, and `ClaudeCodexMcp.Tests/ClaudeCodexMcp.Tests.csproj`.
 - Stage 1 verification passed with `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln`, and stdout-discipline checks.
 - Stage 2 verification passed with `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln`, Roslyn diagnostics, and whitespace checks after global-usings adjustments.
+- Stage 3 verification passed with Roslyn error diagnostics, `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln --no-build`, and independent storage-scope checks.
 - Manual Smoke Gate A must be completed before production app-server-dependent stages continue.
 - Manual Smoke Gate B must be completed before production channel behavior is enabled by default.
