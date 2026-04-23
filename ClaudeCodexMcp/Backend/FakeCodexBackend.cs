@@ -15,6 +15,7 @@ public sealed class FakeCodexBackend : ICodexBackend
             BackendKind = CodexBackendNames.Fake,
             SupportsStart = true,
             SupportsObserveStatus = true,
+            SupportsStatusPolling = true,
             SupportsSendInput = true,
             SupportsCancel = true,
             SupportsReadFinalOutput = true,
@@ -32,6 +33,10 @@ public sealed class FakeCodexBackend : ICodexBackend
     public IReadOnlyList<CodexBackendCancelRequest> CancelRequests => cancelRequests;
 
     public IReadOnlyList<CodexBackendResumeRequest> ResumeRequests => resumeRequests;
+
+    public int ObserveStatusCallCount { get; private set; }
+
+    public int PollStatusCallCount { get; private set; }
 
     public CodexBackendOutput Output { get; set; } = new()
     {
@@ -72,6 +77,20 @@ public sealed class FakeCodexBackend : ICodexBackend
     public Task<CodexBackendStatus> ObserveStatusAsync(
         CodexBackendObserveRequest request,
         CancellationToken cancellationToken = default)
+    {
+        ObserveStatusCallCount++;
+        return DequeueStatusAsync(request);
+    }
+
+    public Task<CodexBackendStatus> PollStatusAsync(
+        CodexBackendObserveRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        PollStatusCallCount++;
+        return DequeueStatusAsync(request);
+    }
+
+    private Task<CodexBackendStatus> DequeueStatusAsync(CodexBackendObserveRequest request)
     {
         return Task.FromResult(queuedStatuses.TryDequeue(out var status)
             ? status

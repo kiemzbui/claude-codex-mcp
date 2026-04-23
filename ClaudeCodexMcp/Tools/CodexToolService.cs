@@ -3,6 +3,7 @@ using ClaudeCodexMcp.Configuration;
 using ClaudeCodexMcp.Discovery;
 using ClaudeCodexMcp.Domain;
 using ClaudeCodexMcp.Storage;
+using ClaudeCodexMcp.Supervisor;
 using Microsoft.Extensions.Options;
 
 namespace ClaudeCodexMcp.Tools;
@@ -17,6 +18,7 @@ public sealed class CodexToolService
     private readonly QueueStore queueStore;
     private readonly ICodexBackend backend;
     private readonly CodexCapabilityDiscovery discovery;
+    private readonly CodexJobLockRegistry jobLocks;
 
     public CodexToolService(
         IOptions<ManagerOptions> options,
@@ -24,7 +26,8 @@ public sealed class CodexToolService
         JobStore jobStore,
         QueueStore queueStore,
         ICodexBackend backend,
-        CodexCapabilityDiscovery discovery)
+        CodexCapabilityDiscovery discovery,
+        CodexJobLockRegistry jobLocks)
     {
         this.options = options.Value;
         this.policyValidator = policyValidator;
@@ -32,6 +35,7 @@ public sealed class CodexToolService
         this.queueStore = queueStore;
         this.backend = backend;
         this.discovery = discovery;
+        this.jobLocks = jobLocks;
     }
 
     public CodexListProfilesResponse ListProfiles()
@@ -181,6 +185,17 @@ public sealed class CodexToolService
         CancellationToken cancellationToken = default)
     {
         var waitTimeout = wait ? Math.Clamp(timeoutSeconds ?? DefaultStatusWaitSeconds, 0, MaxStatusWaitSeconds) : 0;
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            return new CodexStatusResponse
+            {
+                WaitRequested = wait,
+                WaitTimeoutSeconds = waitTimeout,
+                Errors = [MissingJobError(jobId)]
+            };
+        }
+
+        await using var lease = await jobLocks.AcquireAsync(jobId.Trim(), cancellationToken);
         var job = await ReadJobOrNullAsync(jobId, cancellationToken);
         if (job is null)
         {
@@ -199,7 +214,7 @@ public sealed class CodexToolService
                 JobId = job.JobId,
                 BackendIds = ToBackendIds(job)
             }, cancellationToken);
-            job = ApplyBackendStatus(job, status);
+            job = CodexJobRecordUpdater.ApplyStatus(job, status);
             await jobStore.SaveAsync(job, cancellationToken);
         }
 
@@ -216,6 +231,12 @@ public sealed class CodexToolService
         string? detail = null,
         CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            return new CodexResultResponse { Errors = [MissingJobError(jobId)] };
+        }
+
+        await using var lease = await jobLocks.AcquireAsync(jobId.Trim(), cancellationToken);
         var job = await ReadJobOrNullAsync(jobId, cancellationToken);
         if (job is null)
         {
@@ -230,15 +251,7 @@ public sealed class CodexToolService
                 JobId = job.JobId,
                 BackendIds = ToBackendIds(job)
             }, cancellationToken);
-            var summary = ProjectionSanitizer.ToOptionalSummary(output.Summary ?? output.FinalText, 2048);
-            job = job with
-            {
-                UpdatedAt = DateTimeOffset.UtcNow,
-                ResultSummary = summary,
-                CodexThreadId = output.BackendIds.ThreadId ?? job.CodexThreadId,
-                CodexTurnId = output.BackendIds.TurnId ?? job.CodexTurnId,
-                CodexSessionId = output.BackendIds.SessionId ?? job.CodexSessionId
-            };
+            job = CodexJobRecordUpdater.ApplyOutput(job, output);
             await jobStore.SaveAsync(job, cancellationToken);
         }
 
@@ -266,6 +279,12 @@ public sealed class CodexToolService
             };
         }
 
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            return new CodexSendInputResponse { Errors = [MissingJobError(jobId)] };
+        }
+
+        await using var lease = await jobLocks.AcquireAsync(jobId.Trim(), cancellationToken);
         var job = await ReadJobOrNullAsync(jobId, cancellationToken);
         if (job is null)
         {
@@ -311,7 +330,7 @@ public sealed class CodexToolService
             LaunchPolicy = CreateLaunchPolicy(validation.Value)
         }, cancellationToken);
 
-        var updated = ApplyBackendStatus(persistedOptions, status);
+        var updated = CodexJobRecordUpdater.ApplyStatus(persistedOptions, status);
         await jobStore.SaveAsync(updated, cancellationToken);
 
         return new CodexSendInputResponse
@@ -325,6 +344,12 @@ public sealed class CodexToolService
         string? jobId,
         CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            return new CodexCancelResponse { Errors = [MissingJobError(jobId)] };
+        }
+
+        await using var lease = await jobLocks.AcquireAsync(jobId.Trim(), cancellationToken);
         var job = await ReadJobOrNullAsync(jobId, cancellationToken);
         if (job is null)
         {
@@ -345,7 +370,7 @@ public sealed class CodexToolService
             JobId = job.JobId,
             BackendIds = ToBackendIds(job)
         }, cancellationToken);
-        var updated = ApplyBackendStatus(job, status) with { Status = JobState.Cancelled };
+        var updated = CodexJobRecordUpdater.ApplyStatus(job, status) with { Status = JobState.Cancelled };
         await jobStore.SaveAsync(updated, cancellationToken);
 
         return new CodexCancelResponse

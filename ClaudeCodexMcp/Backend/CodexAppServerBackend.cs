@@ -110,6 +110,27 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
         return status;
     }
 
+    public async Task<CodexBackendStatus> PollStatusAsync(
+        CodexBackendObserveRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(request.BackendIds.ThreadId))
+        {
+            throw new CodexBackendThreadUnrecoverableException("A Codex thread id is required for status polling.");
+        }
+
+        var read = await ReadThreadAsync(request.JobId, request.BackendIds, cancellationToken);
+        try
+        {
+            return MapThreadRead(read.Document, read.Ids);
+        }
+        finally
+        {
+            read.Document.Dispose();
+        }
+    }
+
     public async Task<CodexBackendStatus> SendInputAsync(
         CodexBackendSendInputRequest request,
         CancellationToken cancellationToken = default)

@@ -16,6 +16,10 @@ public interface ICodexBackend
         CodexBackendObserveRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<CodexBackendStatus> PollStatusAsync(
+        CodexBackendObserveRequest request,
+        CancellationToken cancellationToken = default);
+
     Task<CodexBackendStatus> SendInputAsync(
         CodexBackendSendInputRequest request,
         CancellationToken cancellationToken = default);

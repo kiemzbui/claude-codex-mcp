@@ -332,7 +332,7 @@ Exit criteria:
 
 ### Stage 8: Background Supervisor
 
-Owned write scope: `ClaudeCodexMcp/Supervisor/**`, supervisor-facing backend/storage interfaces if needed, tests under `ClaudeCodexMcp.Tests/Supervisor/**`.
+Owned write scope: `ClaudeCodexMcp/Supervisor/**`, supervisor-facing backend/storage interfaces if needed, tests under `ClaudeCodexMcp.Tests/Supervisor/**`. Stage 8 may also update backend/domain/tool/host registration files when required for supervisor polling fallback, persisted supervisor status fields, and shared per-job locking with tool-driven writes: `ClaudeCodexMcp/Backend/**`, `ClaudeCodexMcp/Domain/**`, `ClaudeCodexMcp/Tools/CodexToolService.cs`, `ClaudeCodexMcp/ClaudeCodexMcpHost.cs`, and matching focused tests under `ClaudeCodexMcp.Tests/Tools/**`.
 
 Intent:
 

@@ -3,6 +3,7 @@ using ClaudeCodexMcp.Configuration;
 using ClaudeCodexMcp.Discovery;
 using ClaudeCodexMcp.Domain;
 using ClaudeCodexMcp.Storage;
+using ClaudeCodexMcp.Supervisor;
 using ClaudeCodexMcp.Tools;
 using ClaudeCodexMcp.Workflows;
 using Microsoft.Extensions.Options;
@@ -244,7 +245,8 @@ public sealed class CodexToolServiceTests
                 JobStore,
                 QueueStore,
                 backend ?? new InspectingBackend(StateDirectory),
-                discovery);
+                discovery,
+                new CodexJobLockRegistry());
         }
 
         public void Dispose()
@@ -306,6 +308,7 @@ public sealed class CodexToolServiceTests
             BackendKind = "fake",
             SupportsStart = true,
             SupportsObserveStatus = true,
+            SupportsStatusPolling = true,
             SupportsSendInput = true,
             SupportsCancel = true,
             SupportsReadFinalOutput = true,
@@ -350,6 +353,11 @@ public sealed class CodexToolServiceTests
                 State = JobState.Running,
                 BackendIds = request.BackendIds
             });
+
+        public Task<CodexBackendStatus> PollStatusAsync(
+            CodexBackendObserveRequest request,
+            CancellationToken cancellationToken = default) =>
+            ObserveStatusAsync(request, cancellationToken);
 
         public Task<CodexBackendStatus> SendInputAsync(
             CodexBackendSendInputRequest request,

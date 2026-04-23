@@ -13,6 +13,7 @@ public static class CodexBackendCapabilityNames
 {
     public const string Start = "start";
     public const string ObserveStatus = "observe_status";
+    public const string PollStatus = "poll_status";
     public const string SendInput = "send_input";
     public const string Cancel = "cancel";
     public const string ReadFinalOutput = "read_final_output";
@@ -35,6 +36,8 @@ public sealed record CodexBackendCapabilities
 
     public bool SupportsObserveStatus { get; init; }
 
+    public bool SupportsStatusPolling { get; init; }
+
     public bool SupportsSendInput { get; init; }
 
     public bool SupportsCancel { get; init; }
@@ -53,6 +56,7 @@ public sealed record CodexBackendCapabilities
         BackendKind = CodexBackendNames.AppServer,
         SupportsStart = true,
         SupportsObserveStatus = true,
+        SupportsStatusPolling = true,
         SupportsSendInput = true,
         SupportsCancel = true,
         SupportsReadFinalOutput = true,
@@ -66,6 +70,7 @@ public sealed record CodexBackendCapabilities
         BackendKind = CodexBackendNames.Cli,
         SupportsStart = true,
         SupportsObserveStatus = false,
+        SupportsStatusPolling = false,
         SupportsSendInput = false,
         SupportsCancel = true,
         SupportsReadFinalOutput = true,
@@ -74,6 +79,7 @@ public sealed record CodexBackendCapabilities
         DegradedCapabilities =
         [
             new(CodexBackendCapabilityNames.ObserveStatus, "CLI fallback cannot stream app-server lifecycle notifications."),
+            new(CodexBackendCapabilityNames.PollStatus, "CLI fallback status polling is not implemented in Stage 8."),
             new(CodexBackendCapabilityNames.SendInput, "CLI fallback follow-up input is not implemented in Stage 6."),
             new(CodexBackendCapabilityNames.ReadUsage, "CLI fallback does not expose app-server token usage or rate-limit windows."),
             new(CodexBackendCapabilityNames.Resume, "CLI fallback does not provide verified thread resume support.")
@@ -199,6 +205,14 @@ public sealed record CodexBackendStatus
 
     public WaitingForInputRecord? WaitingForInput { get; init; }
 
+    public string? ResultSummary { get; init; }
+
+    public IReadOnlyList<string> ChangedFiles { get; init; } = [];
+
+    public string? TestSummary { get; init; }
+
+    public CodexBackendUsageSnapshot? UsageSnapshot { get; init; }
+
     public string? LastError { get; init; }
 }
 
@@ -216,6 +230,10 @@ public sealed record CodexBackendOutput
     public string? FinalText { get; init; }
 
     public string? Summary { get; init; }
+
+    public IReadOnlyList<string> ChangedFiles { get; init; } = [];
+
+    public string? TestSummary { get; init; }
 }
 
 public sealed record CodexBackendTokenUsage

@@ -98,6 +98,8 @@ public sealed record CodexJobRecord
 
     public string? TestSummary { get; init; }
 
+    public CodexBackendUsageSnapshot? UsageSnapshot { get; init; }
+
     public string? LastError { get; init; }
 
     public string LogPath { get; init; } = string.Empty;
