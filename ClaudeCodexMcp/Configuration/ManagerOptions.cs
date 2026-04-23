@@ -71,9 +71,23 @@ public sealed class ProfileOptions
 
     public string? DefaultModel { get; set; }
 
+    public List<string> AllowedModels { get; set; } = [];
+
+    public bool AllowModelOverride { get; set; }
+
     public string? DefaultEffort { get; set; }
 
+    public List<string> AllowedEfforts { get; set; } = [];
+
+    public bool AllowEffortOverride { get; set; }
+
     public bool FastMode { get; set; }
+
+    public bool AllowFastModeOverride { get; set; }
+
+    public bool RequireFastMode { get; set; }
+
+    public string? DefaultServiceTier { get; set; }
 }
 
 public sealed class ChannelNotificationOptions
