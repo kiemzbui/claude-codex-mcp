@@ -3,39 +3,28 @@
 **Status:** SUCCESS
 
 ## Step executed
-Implemented Stage 11 - Full Output Pagination: `codex_read_output`, filtered output pagination, response byte budgets, and `codex_result detail="full"` safeguards.
+*Codex*: Fixed Stage 11 full-output pagination truncation so page continuation, field truncation, and combined truncation always expose a recovery path.
 
 ## Files changed
-- ClaudeCodexMcp/Domain/OutputRecords.cs - added response budget constants, artifact refs, and output page total counts.
-- ClaudeCodexMcp/Domain/ToolDtos.cs - added full-output result fields and the `CodexReadOutputResponse` DTO.
-- ClaudeCodexMcp/Storage/OutputStore.cs - added thread/turn/agent filtering, paginated reads with total counts, and log-ref helpers.
-- ClaudeCodexMcp/Storage/OutputStoreBudget.cs - added UTF-8 byte budget enforcement and string-field truncation before serialization.
-- ClaudeCodexMcp/Tools/CodexToolService.cs - added `ReadOutputAsync`, wired full result detail, backend final-output fallback, artifact refs, and budgeted responses.
-- ClaudeCodexMcp/Tools/CodexTools.cs - registered the `codex_read_output` MCP tool.
-- ClaudeCodexMcp.Tests/Storage/StorageTests.cs - added storage coverage for filters, offsets, limits, and end markers.
-- ClaudeCodexMcp.Tests/Tools/CodexToolServiceTests.cs - added tool coverage for missing output, pagination, backend fallback, truncation markers, valid JSON after truncation, budget enforcement, artifact refs, and default summary behavior.
-- Docs/WorkItems/ImplementClaudeCodexMcpMvp/workreports/step11_work_report.md - *Codex*: Stage 11 work report.
+- ClaudeCodexMcp/Storage/OutputStoreBudget.cs - marks page continuation as truncation, removes misleading field-truncation cursors when recovery refs exist, and enforces no dead-end truncated read/result responses.
+- ClaudeCodexMcp/Tools/CodexToolService.cs - stops emitting a fake field-level result cursor and adds artifact/log refs if result budget enforcement creates truncation.
+- ClaudeCodexMcp.Tests/Tools/CodexToolServiceTests.cs - adds coverage for page-only continuation truncation, field-only truncation with log recovery refs, combined page plus field truncation, and full result field recovery behavior.
+- Docs/WorkItems/ImplementClaudeCodexMcpMvp/workreports/step11_work_report.md - records this focused Stage 11 fix.
 
 ## Analysis queries run
-- `dotnet build ClaudeCodexMcp.sln` before edits -> 0 errors, 0 warnings.
-- `rg "OutputStore|AppendAsync|OutputLogEntry|ReadFinalOutput|ResultAsync|codex_read_output|detail" ClaudeCodexMcp ClaudeCodexMcp.Tests` -> scoped existing output/result paths before editing.
-- `rg "codex_read_output|OutputResponseLimits|PaginatedChunkBytes|FullBytes" ClaudeCodexMcp ClaudeCodexMcp.Tests` -> confirmed Stage 11 tool and budget symbols after editing.
-- Pre queries from `execution_recs.md` -> *Codex*: NONE defined for Stage 11.
+- *Codex*: `rg -n "codex_read_output|ReadOutput|OutputPage|truncated|endOfOutput|nextOffset|nextCursor|artifact|log" ClaudeCodexMcp ClaudeCodexMcp.Tests` -> located Stage 11 output shaping paths; no execution_recs.md Pre query required a before/after count.
+- *Codex*: Roslyn solution status -> 2 projects, 68 documents loaded.
+- *Codex*: Roslyn diagnostics before editing -> reported workspace diagnostics that did not reproduce in the CLI build.
 
 ## Build result
-Before: 0 errors. After: 0 errors.
-
-Final verification:
-- `dotnet build ClaudeCodexMcp.sln` -> succeeded, 0 warnings, 0 errors.
-- `dotnet test ClaudeCodexMcp.sln --no-build` -> passed, 92 tests.
-- Focused command `dotnet test ClaudeCodexMcp.Tests/ClaudeCodexMcp.Tests.csproj --filter "FullyQualifiedName~StorageTests|FullyQualifiedName~CodexToolServiceTests|FullyQualifiedName~CodexJobSupervisorTests"` -> passed, 42 tests.
+Before: 0 CLI build errors observed in this pass. After: 0 errors.
+*Codex*: `dotnet test ClaudeCodexMcp.Tests\ClaudeCodexMcp.Tests.csproj --nologo --filter "FullyQualifiedName~ClaudeCodexMcp.Tests.Tools.CodexToolServiceTests"` -> passed, 21 tests.
+*Codex*: `dotnet test ClaudeCodexMcp.Tests\ClaudeCodexMcp.Tests.csproj --nologo --filter "FullyQualifiedName~ClaudeCodexMcp.Tests.Storage.StorageTests"` -> passed, 9 tests.
+*Codex*: `dotnet build ClaudeCodexMcp.sln --nologo` -> succeeded, 0 warnings, 0 errors.
+*Codex*: `dotnet test ClaudeCodexMcp.sln --nologo --no-build` -> passed, 94 tests.
 
 ## Surprises / deviations from plan
-*Codex*: No scope expansion was needed. One intermediate focused test exposed that field-level truncation was not marking the response as truncated; fixed before final verification. One parallel build/test attempt hit a transient DLL file lock, so final verification was rerun sequentially.
+*Codex*: Roslyn reported many test-project diagnostics before editing, but `dotnet build ClaudeCodexMcp.sln --nologo` completed with 0 warnings and 0 errors. No scope widening was needed.
 
 ## Verification queries (for work-verifier)
-- `dotnet build ClaudeCodexMcp.sln`
-- `dotnet test ClaudeCodexMcp.sln --no-build`
-- `dotnet test ClaudeCodexMcp.Tests/ClaudeCodexMcp.Tests.csproj --filter "FullyQualifiedName~StorageTests|FullyQualifiedName~CodexToolServiceTests"`
-- `rg "codex_read_output" ClaudeCodexMcp ClaudeCodexMcp.Tests`
-- `rg "OutputResponseLimits|PaginatedChunkBytes|FullBytes|AbsoluteHardCapBytes|ChannelEventBytes" ClaudeCodexMcp ClaudeCodexMcp.Tests`
+*Codex*: NONE - execution_recs.md does not define Stage 11 Post queries.

@@ -244,6 +244,7 @@ public sealed class CodexToolServiceTests
             format: "text");
 
         Assert.False(firstPage.EndOfOutput);
+        Assert.True(firstPage.Truncated);
         Assert.Equal(1, firstPage.NextOffset);
         Assert.Equal("first", Assert.Single(firstPage.Entries).Message);
         Assert.True(secondPage.EndOfOutput);
@@ -302,6 +303,55 @@ public sealed class CodexToolServiceTests
     }
 
     [Fact]
+    public async Task ReadOutputFieldTruncationKeepsRecoveryRefsWithoutContinuation()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var start = await service.StartTaskAsync("implementation", "direct", "Field truncation", workspace.RepoRoot, "Prompt");
+        await workspace.OutputStore.AppendAsync(new OutputLogEntry
+        {
+            JobId = start.Job!.JobId,
+            Message = "field " + new string('x', OutputResponseLimits.PaginatedChunkBytes * 2)
+        });
+
+        var output = await service.ReadOutputAsync(start.Job.JobId, limit: 10);
+
+        Assert.True(output.Truncated);
+        Assert.True(output.EndOfOutput);
+        Assert.Null(output.NextOffset);
+        Assert.Null(output.NextCursor);
+        Assert.Contains("[truncated]", Assert.Single(output.Entries).Message);
+        Assert.False(string.IsNullOrWhiteSpace(output.LogRef));
+        Assert.Contains(output.ArtifactRefs, artifact => artifact.Kind == "log" && !string.IsNullOrWhiteSpace(artifact.Ref));
+    }
+
+    [Fact]
+    public async Task ReadOutputCombinesPageContinuationWithFieldRecoveryRefs()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var start = await service.StartTaskAsync("implementation", "direct", "Combined truncation", workspace.RepoRoot, "Prompt");
+        await workspace.OutputStore.AppendAsync(new OutputLogEntry
+        {
+            JobId = start.Job!.JobId,
+            Message = "field " + new string('x', OutputResponseLimits.PaginatedChunkBytes * 2)
+        });
+        await workspace.OutputStore.AppendAsync(new OutputLogEntry
+        {
+            JobId = start.Job.JobId,
+            Message = "second page"
+        });
+
+        var output = await service.ReadOutputAsync(start.Job.JobId, offset: 0, limit: 1);
+
+        Assert.True(output.Truncated);
+        Assert.False(output.EndOfOutput);
+        Assert.Equal(1, output.NextOffset);
+        Assert.Contains("[truncated]", Assert.Single(output.Entries).Message);
+        Assert.Contains(output.ArtifactRefs, artifact => artifact.Kind == "log" && !string.IsNullOrWhiteSpace(artifact.Ref));
+    }
+
+    [Fact]
     public async Task ResultFullIncludesBudgetedOutputTruncationAndArtifactRefs()
     {
         using var workspace = TemporaryToolWorkspace.Create();
@@ -327,6 +377,8 @@ public sealed class CodexToolServiceTests
         using var _ = JsonDocument.Parse(json);
         Assert.True(result.FullOutputIncluded);
         Assert.True(result.Truncated);
+        Assert.Null(result.NextOffset);
+        Assert.Null(result.NextCursor);
         Assert.Contains("[truncated]", result.FullOutput);
         Assert.Contains(result.ArtifactRefs, artifact => artifact.Kind == "log");
         Assert.Contains(result.ArtifactRefs, artifact => artifact.Kind == "backendThread" && artifact.Ref == "thread-full");

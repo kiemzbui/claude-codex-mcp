@@ -49,7 +49,7 @@ public static class OutputStoreBudget
                 "jsonl" => RenderJsonLines(entries),
                 _ => null
             },
-            Truncated = entriesTruncated,
+            Truncated = entriesTruncated || hasMore,
             NextOffset = hasMore ? page.NextOffset : null,
             EndOfOutput = page.EndOfLog,
             LogRef = logRef,
@@ -57,7 +57,7 @@ public static class OutputStoreBudget
             Errors = errors
         };
 
-        return EnforceReadOutputBudget(response);
+        return EnsureReadOutputRecovery(EnforceReadOutputBudget(response));
     }
 
     public static CodexReadOutputResponse EnforceReadOutputBudget(CodexReadOutputResponse response) =>
@@ -104,8 +104,7 @@ public static class OutputStoreBudget
             result = result with
             {
                 Entries = entries.ToArray(),
-                Truncated = true,
-                NextCursor = "truncated-string-field"
+                Truncated = true
             };
         }
 
@@ -116,17 +115,16 @@ public static class OutputStoreBudget
             result = result with
             {
                 Text = text,
-                Truncated = true,
-                NextCursor = "truncated-string-field"
+                Truncated = true
             };
         }
 
         if (SerializedByteCount(result) <= maxBytes)
         {
-            return result;
+            return EnsureReadOutputRecovery(result);
         }
 
-        return result with
+        return EnsureReadOutputRecovery(result with
         {
             Entries = [],
             Text = null,
@@ -134,7 +132,7 @@ public static class OutputStoreBudget
             EndOfOutput = false,
             NextOffset = response.Offset,
             NextCursor = $"offset:{response.Offset}"
-        };
+        });
     }
 
     public static CodexResultResponse EnforceResultBudget(
@@ -158,8 +156,7 @@ public static class OutputStoreBudget
             result = result with
             {
                 FullOutput = fullOutput,
-                Truncated = true,
-                NextCursor = response.NextCursor ?? "truncated-string-field"
+                Truncated = true
             };
         }
 
@@ -170,19 +167,17 @@ public static class OutputStoreBudget
             result = result with
             {
                 Summary = summary,
-                Truncated = true,
-                NextCursor = response.NextCursor ?? "truncated-string-field"
+                Truncated = true
             };
         }
 
         return SerializedByteCount(result) <= maxBytes
-            ? result
-            : result with
+            ? EnsureResultRecovery(result)
+            : EnsureResultRecovery(result with
             {
                 FullOutput = null,
-                Truncated = true,
-                NextCursor = response.NextCursor ?? "truncated-string-field"
-            };
+                Truncated = true
+            });
     }
 
     public static int SerializedByteCount<T>(T value) =>
@@ -241,6 +236,43 @@ public static class OutputStoreBudget
 
     private static int NormalizeMaxBytes(int maxBytes) =>
         Math.Clamp(maxBytes, 1, OutputResponseLimits.AbsoluteHardCapBytes);
+
+    private static CodexReadOutputResponse EnsureReadOutputRecovery(CodexReadOutputResponse response)
+    {
+        if (!response.Truncated || HasContinuation(response) || HasRecoveryReference(response.LogRef, response.ArtifactRefs))
+        {
+            return response;
+        }
+
+        return response with
+        {
+            EndOfOutput = false,
+            NextOffset = response.Offset,
+            NextCursor = $"offset:{response.Offset}"
+        };
+    }
+
+    private static CodexResultResponse EnsureResultRecovery(CodexResultResponse response)
+    {
+        if (!response.Truncated || HasContinuation(response) || HasRecoveryReference(response.ArtifactRefs))
+        {
+            return response;
+        }
+
+        return response with { NextCursor = "truncated-response" };
+    }
+
+    private static bool HasContinuation(CodexReadOutputResponse response) =>
+        response.NextOffset.HasValue || !string.IsNullOrWhiteSpace(response.NextCursor);
+
+    private static bool HasContinuation(CodexResultResponse response) =>
+        response.NextOffset.HasValue || !string.IsNullOrWhiteSpace(response.NextCursor);
+
+    private static bool HasRecoveryReference(string? logRef, IReadOnlyList<OutputArtifactRef> artifactRefs) =>
+        !string.IsNullOrWhiteSpace(logRef) || HasRecoveryReference(artifactRefs);
+
+    private static bool HasRecoveryReference(IReadOnlyList<OutputArtifactRef> artifactRefs) =>
+        artifactRefs.Any(artifact => !string.IsNullOrWhiteSpace(artifact.Ref));
 
     private static OutputLogEntry ShrinkEntry(OutputLogEntry entry)
     {

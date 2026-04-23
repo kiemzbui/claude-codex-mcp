@@ -431,7 +431,7 @@ Work items:
   - absolute hard cap: 256 KB
   - channel event hard cap: 4 KB
 - Truncate string fields before serialization so JSON responses remain valid.
-- Include `truncated`, `nextOffset` or `nextCursor`, and artifact/log references when output exceeds a response budget.
+- Include `truncated` and artifact/log references when output exceeds a response budget. When truncation is caused by additional paginated output, also include `nextOffset` or `nextCursor` and set `endOfOutput=false`. When truncation is field-level within an otherwise complete page, `endOfOutput=true` and no continuation marker are allowed only if artifact/log references identify where the exact untruncated content can be read.
 
 Out of scope:
 
@@ -439,7 +439,7 @@ Out of scope:
 
 Exit criteria:
 
-- Tests cover offsets, limits, end-of-output markers, missing output, truncation marker, valid JSON after truncation, response budget enforcement, artifact refs, and default summary behavior.
+- Tests cover offsets, limits, end-of-output markers, missing output, truncation marker, valid JSON after truncation, response budget enforcement, artifact refs, field-level truncation with artifact/log recovery and no dead-end truncation, and default summary behavior.
 
 ### Stage 12: Channel Notifications
 

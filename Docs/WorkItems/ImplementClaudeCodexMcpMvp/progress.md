@@ -14,7 +14,7 @@
 - [x] Stage 8 - Background Supervisor
 - [x] Stage 9 - Queued Input And Cancellation
 - [x] Stage 10 - Usage And Statusline
-- [ ] Stage 11 - Full Output Pagination
+- [x] Stage 11 - Full Output Pagination
 - [ ] Stage 12 - Channel Notifications
 - [ ] Stage 13 - CLI Fallback
 - [ ] Stage 14 - End-To-End Smoke Tests And Acceptance
@@ -22,9 +22,9 @@
 
 ## Current Checkpoint
 
-- Latest completed point: Stage 10 - Usage And Statusline.
+- Latest completed point: Stage 11 - Full Output Pagination.
 - Active reality: app-server-first backend behavior is approved for continuation based on `app_server_feasibility.md`; CLI fallback remains required for degraded environments. Channel protocol prerequisites are present, so production channel notification work should still be implemented later as best-effort and fallback-aware, disabled by default until Manual Smoke Gate C verifies live delivery with a real `claude --channels server:claude-codex-mcp` receiver.
-- Next executable step: Stage 11 - Full Output Pagination.
+- Next executable step: Stage 12 - Channel Notifications.
 - Next executor command: `$orchestrate execute Docs/WorkItems/ImplementClaudeCodexMcpMvp`.
 
 ## Checkpoint Notes
@@ -44,3 +44,4 @@
 - Stage 8 verification passed with `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, focused `ClaudeCodexMcp.Tests.Supervisor` and `ClaudeCodexMcp.Tests.Tools` checks, and Stage 8 scope checks.
 - Stage 9 verification passed with `dotnet build ClaudeCodexMcp.sln --no-restore --nologo`, `dotnet test ClaudeCodexMcp.sln --no-restore --nologo`, focused `ClaudeCodexMcp.Tests.Tools`, `ClaudeCodexMcp.Tests.Storage`, and `ClaudeCodexMcp.Tests.Supervisor` checks, `git diff --check`, and Stage 9 scope checks.
 - Stage 10 verification passed with `dotnet build ClaudeCodexMcp.sln --no-restore`, focused usage/statusline tests, `dotnet test ClaudeCodexMcp.sln --no-build`, `git diff --check`, Roslyn diagnostics review, and Stage 10 scope checks including the approved `ClaudeCodexMcp/ClaudeCodexMcpHost.cs` usage-service registration.
+- Stage 11 verification passed with focused `ClaudeCodexMcp.Tests.Tools.CodexToolServiceTests` and `ClaudeCodexMcp.Tests.Storage.StorageTests`, `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, `git diff --check`, Roslyn status review, and Stage 11 truncation scope checks. Field-level truncation may end output without a continuation only when artifact/log refs identify the exact untruncated content; page continuation truncation still requires continuation state and `endOfOutput=false`.

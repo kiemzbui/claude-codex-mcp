@@ -340,14 +340,10 @@ public sealed class CodexToolService
                     fullOutput,
                     OutputResponseLimits.FullBytes,
                     out truncated);
-                if (truncated)
-                {
-                    nextCursor = "truncated-string-field";
-                }
             }
         }
 
-        return OutputStoreBudget.EnforceResultBudget(new CodexResultResponse
+        var result = OutputStoreBudget.EnforceResultBudget(new CodexResultResponse
         {
             Job = ToCompact(job),
             Summary = job.ResultSummary,
@@ -358,6 +354,17 @@ public sealed class CodexToolService
             NextCursor = nextCursor,
             ArtifactRefs = truncated || includeFull ? artifactRefs : []
         }, budget);
+
+        if (result.Truncated && result.ArtifactRefs.Count == 0)
+        {
+            result = OutputStoreBudget.EnforceResultBudget(result with
+            {
+                NextCursor = null,
+                ArtifactRefs = artifactRefs
+            }, budget);
+        }
+
+        return result;
     }
 
     public async Task<CodexReadOutputResponse> ReadOutputAsync(
