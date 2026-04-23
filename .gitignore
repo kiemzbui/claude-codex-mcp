@@ -364,3 +364,13 @@ FodyWeavers.xsd
 
 # AI Docs
 Docs/
+
+# Claude Codex MCP runtime and local configuration
+.codex-manager/
+codex-manager.json
+codex-manager.local.json
+*.local.json
+
+# .NET test artifacts
+[Tt]est[Rr]esults/
+coverage/

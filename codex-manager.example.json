@@ -1,0 +1,36 @@
+{
+  "manager": {
+    "stateDirectory": ".codex-manager",
+    "logging": {
+      "enableFileLogging": true,
+      "filePath": "logs/server.log",
+      "minimumLevel": "Information"
+    },
+    "profiles": {
+      "default": {
+        "repo": "C:\\path\\to\\repo",
+        "allowedRepos": [
+          "C:\\path\\to\\repo"
+        ],
+        "taskPrefix": "Use the repository instructions.",
+        "backend": "appServer",
+        "readOnly": false,
+        "permissions": {
+          "sandbox": "workspace-write",
+          "approvalPolicy": "never"
+        },
+        "defaultWorkflow": "direct",
+        "allowedWorkflows": [
+          "direct"
+        ],
+        "maxConcurrentJobs": 1,
+        "channelNotifications": {
+          "enabled": false
+        },
+        "defaultModel": "codex-default",
+        "defaultEffort": "medium",
+        "fastMode": false
+      }
+    }
+  }
+}
