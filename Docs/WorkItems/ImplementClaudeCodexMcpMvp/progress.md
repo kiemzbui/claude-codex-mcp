@@ -5,8 +5,8 @@
 - [x] Stage 1 - Scaffold, Options, And Logging
 - [x] Stage 2 - Profile And Workflow Validation
 - [x] Stage 3 - Durable Job, Queue, Output, And Notification Storage
-- [ ] Stage 4 - App-Server Feasibility Gate
-- [ ] Manual Smoke Gate A - App-Server Feasibility Review
+- [x] Stage 4 - App-Server Feasibility Gate
+- [x] Manual Smoke Gate A - App-Server Feasibility Review
 - [ ] Stage 5 - Channel Feasibility Gate
 - [ ] Manual Smoke Gate B - Channel Feasibility Review
 - [ ] Stage 6 - Backend Abstraction And Minimal Lifecycle
@@ -22,9 +22,9 @@
 
 ## Current Checkpoint
 
-- Latest completed point: Stage 3 - Durable Job, Queue, Output, And Notification Storage.
-- Active reality: durable job, queue, output, notification, and discovery-cache storage primitives are in place with focused storage tests.
-- Next executable step: Stage 4 - App-Server Feasibility Gate.
+- Latest completed point: Manual Smoke Gate A - App-Server Feasibility Review.
+- Active reality: app-server-first backend behavior is approved for continuation based on `app_server_feasibility.md`; CLI fallback remains required for degraded environments.
+- Next executable step: Stage 5 - Channel Feasibility Gate.
 - Next executor command: `$orchestrate execute Docs/WorkItems/ImplementClaudeCodexMcpMvp`.
 
 ## Checkpoint Notes
@@ -35,5 +35,6 @@
 - Stage 1 verification passed with `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln`, and stdout-discipline checks.
 - Stage 2 verification passed with `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln`, Roslyn diagnostics, and whitespace checks after global-usings adjustments.
 - Stage 3 verification passed with Roslyn error diagnostics, `dotnet build ClaudeCodexMcp.sln`, `dotnet test ClaudeCodexMcp.sln --no-build`, and independent storage-scope checks.
-- Manual Smoke Gate A must be completed before production app-server-dependent stages continue.
+- Stage 4 verification passed with Roslyn error diagnostics, `dotnet build ClaudeCodexMcp.sln --nologo`, `dotnet test ClaudeCodexMcp.sln --nologo --no-build`, generated protocol artifact checks, and live app-server probe evidence.
+- Manual Smoke Gate A passed on review of `app_server_feasibility.md`; continue with app-server-first behavior while preserving CLI fallback for degraded environments.
 - Manual Smoke Gate B must be completed before production channel behavior is enabled by default.
