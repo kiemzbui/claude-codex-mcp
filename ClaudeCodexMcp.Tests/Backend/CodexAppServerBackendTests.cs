@@ -471,6 +471,50 @@ public sealed class CodexAppServerBackendTests
     }
 
     [Fact]
+    public async Task ReadUsageDrainsLateTokenUsageNotificationsBeforeRateLimitRead()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-usage-settle", "session-usage-settle"));
+        client.EnqueueResponse(TurnStartResponse("turn-usage-settle"));
+        client.EnqueueNotification("""{"method":"turn/completed","params":{"threadId":"thread-usage-settle","turnId":"turn-usage-settle"}}""");
+        client.EnqueueResponse("""
+            {"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":25.0,"windowDurationMins":300,"resetsAt":1770000000},"secondary":null,"credits":null,"planType":null,"rateLimitReachedType":null},"rateLimitsByLimitId":null}}
+            """);
+        var backend = CreateBackend(workspace, client, new CodexAppServerBackendOptions
+        {
+            NotificationDrainTimeout = TimeSpan.Zero,
+            ReadinessSignalTimeout = TimeSpan.Zero,
+            ThreadReadRetryDelay = TimeSpan.Zero,
+            ThreadReadMaxAttempts = 1,
+            UsageSettleTimeout = TimeSpan.FromMilliseconds(1)
+        });
+        var start = await StartAsync(backend, workspace, "job_usage_settle");
+
+        var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_usage_settle",
+            BackendIds = start.BackendIds
+        });
+        Assert.Equal(JobState.Completed, status.State);
+
+        client.EnqueueNotification("""
+            {"method":"thread/tokenUsage/updated","params":{"threadId":"thread-usage-settle","turnId":"turn-usage-settle","tokenUsage":{"total":{"totalTokens":777,"inputTokens":500,"cachedInputTokens":0,"outputTokens":277,"reasoningOutputTokens":70},"last":{"totalTokens":77,"inputTokens":50,"cachedInputTokens":0,"outputTokens":27,"reasoningOutputTokens":7},"modelContextWindow":258400}}}
+            """);
+        var usage = await backend.ReadUsageAsync(new CodexBackendUsageRequest
+        {
+            JobId = "job_usage_settle",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(777, usage.TokenUsage?.TotalTokens);
+        Assert.Equal(258400, usage.TokenUsage?.ContextWindowTokens);
+        Assert.Equal("codex", usage.RateLimits?.LimitId);
+        Assert.Equal(25.0, usage.RateLimits?.Primary?.UsedPercent);
+    }
+
+    [Fact]
     public void CapabilityReportsIncludeDegradedCliShape()
     {
         var appServer = CodexBackendCapabilities.AppServer();

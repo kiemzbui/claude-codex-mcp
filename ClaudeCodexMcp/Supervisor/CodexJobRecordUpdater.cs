@@ -35,7 +35,7 @@ public static class CodexJobRecordUpdater
             ResultSummary = ProjectionSanitizer.ToOptionalSummary(status.ResultSummary ?? job.ResultSummary, 2048),
             ChangedFiles = status.ChangedFiles.Count > 0 ? status.ChangedFiles : job.ChangedFiles,
             TestSummary = ProjectionSanitizer.ToOptionalSummary(status.TestSummary ?? job.TestSummary, 2048),
-            UsageSnapshot = status.UsageSnapshot ?? job.UsageSnapshot,
+            UsageSnapshot = MergeUsage(job.UsageSnapshot, status.UsageSnapshot),
             LastError = ProjectionSanitizer.ToOptionalSummary(status.LastError)
         };
     }
@@ -62,8 +62,97 @@ public static class CodexJobRecordUpdater
     public static CodexJobRecord ApplyUsage(CodexJobRecord job, CodexBackendUsageSnapshot usage) => job with
     {
         UpdatedAt = DateTimeOffset.UtcNow,
-        UsageSnapshot = usage
+        UsageSnapshot = MergeUsage(job.UsageSnapshot, usage)
     };
+
+    public static CodexBackendUsageSnapshot? MergeUsage(
+        CodexBackendUsageSnapshot? current,
+        CodexBackendUsageSnapshot? next)
+    {
+        if (next is null)
+        {
+            return current;
+        }
+
+        if (current is null)
+        {
+            return next;
+        }
+
+        return new CodexBackendUsageSnapshot
+        {
+            TokenUsage = MergeTokenUsage(current.TokenUsage, next.TokenUsage),
+            RateLimits = MergeRateLimits(current.RateLimits, next.RateLimits)
+        };
+    }
+
+    private static CodexBackendTokenUsage? MergeTokenUsage(
+        CodexBackendTokenUsage? current,
+        CodexBackendTokenUsage? next)
+    {
+        if (next is null)
+        {
+            return current;
+        }
+
+        if (current is null)
+        {
+            return next;
+        }
+
+        return new CodexBackendTokenUsage
+        {
+            TotalTokens = next.TotalTokens ?? current.TotalTokens,
+            InputTokens = next.InputTokens ?? current.InputTokens,
+            OutputTokens = next.OutputTokens ?? current.OutputTokens,
+            ReasoningOutputTokens = next.ReasoningOutputTokens ?? current.ReasoningOutputTokens,
+            ContextWindowTokens = next.ContextWindowTokens ?? current.ContextWindowTokens
+        };
+    }
+
+    private static CodexBackendRateLimits? MergeRateLimits(
+        CodexBackendRateLimits? current,
+        CodexBackendRateLimits? next)
+    {
+        if (next is null)
+        {
+            return current;
+        }
+
+        if (current is null)
+        {
+            return next;
+        }
+
+        return new CodexBackendRateLimits
+        {
+            LimitId = next.LimitId ?? current.LimitId,
+            Primary = MergeRateLimitWindow(current.Primary, next.Primary),
+            Secondary = MergeRateLimitWindow(current.Secondary, next.Secondary)
+        };
+    }
+
+    private static CodexBackendRateLimitWindow? MergeRateLimitWindow(
+        CodexBackendRateLimitWindow? current,
+        CodexBackendRateLimitWindow? next)
+    {
+        if (next is null)
+        {
+            return current;
+        }
+
+        if (current is null)
+        {
+            return next;
+        }
+
+        return new CodexBackendRateLimitWindow
+        {
+            UsedPercent = next.UsedPercent ?? current.UsedPercent,
+            WindowDurationMinutes = next.WindowDurationMinutes ?? current.WindowDurationMinutes,
+            ResetsAt = next.ResetsAt ?? current.ResetsAt
+        };
+    }
 
     public static CodexJobRecord ApplyTransientError(CodexJobRecord job, Exception exception) => job with
     {

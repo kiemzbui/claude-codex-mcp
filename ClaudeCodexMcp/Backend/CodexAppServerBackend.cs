@@ -214,6 +214,11 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(request);
         if (TryGetClient(request.BackendIds, out var client))
         {
+            if (options.UsageSettleTimeout > TimeSpan.Zero)
+            {
+                await DrainNotificationsAsync(client, request.JobId, request.BackendIds, options.UsageSettleTimeout, cancellationToken);
+            }
+
             using var response = await SendAndLogAsync(
                 client,
                 request.JobId,

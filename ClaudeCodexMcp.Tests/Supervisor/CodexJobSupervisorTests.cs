@@ -136,6 +136,57 @@ public sealed class CodexJobSupervisorTests
     }
 
     [Fact]
+    public async Task CompletedRefreshMergesPersistedTokenUsageWithLaterRateLimits()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        var job = await workspace.SaveJobAsync("job_usage_merge", JobState.Running, threadId: "thread-usage-merge");
+        await workspace.JobStore.SaveAsync(job with
+        {
+            UsageSnapshot = new CodexBackendUsageSnapshot
+            {
+                TokenUsage = new CodexBackendTokenUsage
+                {
+                    TotalTokens = 123,
+                    InputTokens = 80,
+                    OutputTokens = 43,
+                    ContextWindowTokens = 1000
+                }
+            }
+        });
+
+        var backend = new ScriptedSupervisorBackend
+        {
+            Usage = new CodexBackendUsageSnapshot
+            {
+                RateLimits = new CodexBackendRateLimits
+                {
+                    LimitId = "codex",
+                    Primary = new CodexBackendRateLimitWindow
+                    {
+                        UsedPercent = 42.5,
+                        WindowDurationMinutes = 300,
+                        ResetsAt = DateTimeOffset.FromUnixTimeSeconds(1770000000)
+                    }
+                }
+            }
+        };
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = JobState.Completed,
+            BackendIds = new CodexBackendIds { ThreadId = "thread-usage-merge" }
+        });
+
+        await workspace.CreateSupervisor(backend).RefreshActiveJobsOnceAsync();
+
+        var stored = await workspace.JobStore.ReadAsync("job_usage_merge");
+        Assert.Equal(JobState.Completed, stored?.Status);
+        Assert.Equal(123, stored?.UsageSnapshot?.TokenUsage?.TotalTokens);
+        Assert.Equal(1000, stored?.UsageSnapshot?.TokenUsage?.ContextWindowTokens);
+        Assert.Equal("codex", stored?.UsageSnapshot?.RateLimits?.LimitId);
+        Assert.Equal(42.5, stored?.UsageSnapshot?.RateLimits?.Primary?.UsedPercent);
+    }
+
+    [Fact]
     public async Task CompletedRefreshWritesWakeSignalIntoOriginatingSessionDirectory()
     {
         using var workspace = SupervisorWorkspace.Create();

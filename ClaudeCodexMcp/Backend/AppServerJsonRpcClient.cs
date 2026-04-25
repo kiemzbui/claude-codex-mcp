@@ -40,6 +40,8 @@ public sealed record CodexAppServerBackendOptions
     public int ThreadReadMaxAttempts { get; init; } = 6;
 
     public TimeSpan ThreadReadRetryDelay { get; init; } = TimeSpan.FromMilliseconds(250);
+
+    public TimeSpan UsageSettleTimeout { get; init; } = TimeSpan.FromMilliseconds(200);
 }
 
 public sealed class CodexAppServerProcessClientFactory : IAppServerJsonRpcClientFactory

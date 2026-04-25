@@ -1022,7 +1022,7 @@ public sealed class CodexToolService
         ResultSummary = ProjectionSanitizer.ToOptionalSummary(status.ResultSummary ?? job.ResultSummary, 2048),
         ChangedFiles = status.ChangedFiles.Count > 0 ? status.ChangedFiles : job.ChangedFiles,
         TestSummary = ProjectionSanitizer.ToOptionalSummary(status.TestSummary ?? job.TestSummary, 2048),
-        UsageSnapshot = status.UsageSnapshot ?? job.UsageSnapshot,
+        UsageSnapshot = CodexJobRecordUpdater.MergeUsage(job.UsageSnapshot, status.UsageSnapshot),
         LastError = ProjectionSanitizer.ToOptionalSummary(status.LastError)
     };
 
