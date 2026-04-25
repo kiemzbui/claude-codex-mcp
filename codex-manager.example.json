@@ -7,11 +7,9 @@
       "minimumLevel": "Information"
     },
     "profiles": {
-      "default": {
-        "repo": "C:\\path\\to\\repo",
-        "allowedRepos": [
-          "C:\\path\\to\\repo"
-        ],
+      "test": {
+        "repo": "*",
+        "allowedRepos": ["*"],
         "taskPrefix": "Use the repository instructions.",
         "backend": "appServer",
         "readOnly": false,
@@ -20,16 +18,102 @@
           "approvalPolicy": "never"
         },
         "defaultWorkflow": "direct",
-        "allowedWorkflows": [
-          "direct"
-        ],
+        "allowedWorkflows": ["direct"],
         "maxConcurrentJobs": 1,
-        "channelNotifications": {
-          "enabled": false
+        "channelNotifications": { "enabled": true },
+        "defaultModel": "gpt-5.4",
+        "defaultEffort": "high",
+        "fastMode": true
+      },
+      "implementation": {
+        "repo": "*",
+        "allowedRepos": ["*"],
+        "taskPrefix": "Use the repository instructions.",
+        "backend": "appServer",
+        "readOnly": false,
+        "permissions": {
+          "sandbox": "workspace-write",
+          "approvalPolicy": "never"
         },
-        "defaultModel": "codex-default",
-        "defaultEffort": "medium",
-        "fastMode": false
+        "defaultWorkflow": "direct",
+        "allowedWorkflows": ["direct", "subagent_manager"],
+        "maxConcurrentJobs": 1,
+        "channelNotifications": { "enabled": true },
+        "defaultModel": "gpt-5.4",
+        "defaultEffort": "high",
+        "fastMode": true
+      },
+      "investigation": {
+        "repo": "*",
+        "allowedRepos": ["*"],
+        "taskPrefix": "Use the repository instructions. Do not edit files.",
+        "backend": "appServer",
+        "readOnly": true,
+        "permissions": {
+          "sandbox": "read-only",
+          "approvalPolicy": "never"
+        },
+        "defaultWorkflow": "direct",
+        "allowedWorkflows": ["direct", "subagent_manager"],
+        "maxConcurrentJobs": 1,
+        "channelNotifications": { "enabled": true },
+        "defaultModel": "gpt-5.4",
+        "defaultEffort": "high",
+        "fastMode": true
+      },
+      "planning": {
+        "repo": "*",
+        "allowedRepos": ["*"],
+        "taskPrefix": "Use the repository instructions.",
+        "backend": "appServer",
+        "readOnly": false,
+        "permissions": {
+          "sandbox": "workspace-write",
+          "approvalPolicy": "never"
+        },
+        "defaultWorkflow": "prepare_orchestrate_plan",
+        "allowedWorkflows": ["prepare_orchestrate_plan", "managed_plan"],
+        "maxConcurrentJobs": 1,
+        "channelNotifications": { "enabled": true },
+        "defaultModel": "gpt-5.4",
+        "defaultEffort": "high",
+        "fastMode": true
+      },
+      "orchestration": {
+        "repo": "*",
+        "allowedRepos": ["*"],
+        "taskPrefix": "Use the repository instructions.",
+        "backend": "appServer",
+        "readOnly": false,
+        "permissions": {
+          "sandbox": "workspace-write",
+          "approvalPolicy": "never"
+        },
+        "defaultWorkflow": "orchestrate_execute",
+        "allowedWorkflows": ["orchestrate_execute", "orchestrate_revise"],
+        "maxConcurrentJobs": 1,
+        "channelNotifications": { "enabled": true },
+        "defaultModel": "gpt-5.4",
+        "defaultEffort": "high",
+        "fastMode": true
+      },
+      "review": {
+        "repo": "*",
+        "allowedRepos": ["*"],
+        "taskPrefix": "Use the repository instructions. Do not edit files.",
+        "backend": "appServer",
+        "readOnly": true,
+        "permissions": {
+          "sandbox": "read-only",
+          "approvalPolicy": "never"
+        },
+        "defaultWorkflow": "direct",
+        "allowedWorkflows": ["direct", "subagent_manager"],
+        "maxConcurrentJobs": 1,
+        "channelNotifications": { "enabled": true },
+        "defaultModel": "gpt-5.4",
+        "defaultEffort": "high",
+        "fastMode": true
       }
     }
   }

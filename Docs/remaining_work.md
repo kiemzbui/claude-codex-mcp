@@ -4,12 +4,11 @@ Snapshot 2026-04-25 after plugin shipped + end-to-end smoke verified.
 
 ## Profiles
 
-- [ ] Define `implementation` profile in `codex-manager.json`
-- [ ] Define `investigation` profile (read-only posture)
-- [ ] Define `planning` profile
-- [ ] Define `orchestration` profile (allows `orchestrate_execute` + `orchestrate_revise`)
-- [ ] Define `review` profile (read-only)
-- [ ] Set per-profile `allowedWorkflows`, `maxConcurrentJobs`, default `model`/`effort`/`fastMode`
+- [x] Define `implementation`, `investigation`, `planning`, `orchestration`, `review` in `codex-manager.example.json` + `codex-manager.local.json`
+- [x] Per-profile `allowedWorkflows`, `maxConcurrentJobs`, defaults (`gpt-5.4` / `high` / `fastMode=true`)
+- [ ] Verify server accepts `"*"` wildcard for `repo` / `allowedRepos` (otherwise need real allowlist)
+- [ ] Verify `sandbox: "read-only"` is the exact value Codex app-server expects for read-only profiles
+- [ ] Smoke test: dispatch via each profile (implementation, investigation, planning, orchestration, review) and confirm routing + permission posture
 - [ ] Verify routing skill keyword-map dispatches correctly to each new profile
 
 ## Polish & cleanup
