@@ -106,4 +106,4 @@ Always render: `[codex status: context X% | weekly X% | 5h X%]`
 
 ## Slash commands
 
-The plugin provides `/codex`, `/codex-status`, `/codex-result`, `/codex-cancel`, `/codex-profiles`. Each accepts `--help`. Slash commands skip routing inference; this skill applies only to NL requests.
+The plugin provides `/codex-run`, `/codex-status`, `/codex-result`, `/codex-cancel`, `/codex-profiles`. Each accepts `--help`. Slash commands skip routing inference; this skill applies only to NL requests.

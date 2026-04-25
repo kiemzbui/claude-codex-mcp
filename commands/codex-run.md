@@ -8,7 +8,7 @@ If the user passed `--help` (anywhere in `$ARGUMENTS`), output the help block be
 ## Help block
 
 ```
-/codex [flags] <prompt>
+/codex-run [flags] <prompt>
 
 Dispatch a Codex job. Skips NL routing — flags + prompt go straight to codex_start_task.
 
@@ -26,9 +26,9 @@ If --profile or --workflow is omitted, the claude-codex skill picks based on pro
 keywords (or asks if ambiguous).
 
 Examples:
-  /codex fix the failing token cleanup test
-  /codex --profile=investigation explain how auth expiry works
-  /codex --profile=orchestration --workflow=orchestrate_execute $orchestrate execute Docs/WorkItems/AuthCleanup
+  /codex-run fix the failing token cleanup test
+  /codex-run --profile=investigation explain how auth expiry works
+  /codex-run --profile=orchestration --workflow=orchestrate_execute $orchestrate execute Docs/WorkItems/AuthCleanup
 ```
 
 ## Dispatch flow

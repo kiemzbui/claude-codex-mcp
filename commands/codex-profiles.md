@@ -38,7 +38,7 @@ Available profiles:
 Workflows: direct, subagent_manager, prepare_orchestrate_plan, managed_plan,
            orchestrate_execute, orchestrate_revise (per-profile allowlist applies)
 
-Use /codex --profile=<name> --workflow=<name> <prompt> to dispatch explicitly.
+Use /codex-run --profile=<name> --workflow=<name> <prompt> to dispatch explicitly.
 ```
 
 ## Detail render
