@@ -116,6 +116,47 @@ public sealed class ProfilePolicyValidatorTests
     }
 
     [Fact]
+    public void WildcardAllowedReposPermitsAnyRequestedRepo()
+    {
+        var profile = BasicProfile("*");
+        profile.AllowedRepos = ["*"];
+        var validator = CreateValidator(new Dictionary<string, ProfileOptions>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["implementation"] = profile
+        });
+
+        var result = validator.ValidateStartDispatch(new StartDispatchRequest(
+            "implementation",
+            CanonicalWorkflows.Direct,
+            "Fix bug",
+            CreateNormalizedPath("any-repo"),
+            new DispatchOptions()));
+
+        Assert.True(result.IsValid, DescribeErrors(result.Errors));
+    }
+
+    [Fact]
+    public void WildcardProfileRepoWithoutRequestedRepoIsRejected()
+    {
+        var profile = BasicProfile("*");
+        profile.AllowedRepos = ["*"];
+        var validator = CreateValidator(new Dictionary<string, ProfileOptions>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["implementation"] = profile
+        });
+
+        var result = validator.ValidateStartDispatch(new StartDispatchRequest(
+            "implementation",
+            CanonicalWorkflows.Direct,
+            "Fix bug",
+            null,
+            new DispatchOptions()));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, error => error.Code == "missing_repo");
+    }
+
+    [Fact]
     public void WorkflowOutsideAllowlistIsRejected()
     {
         var repo = CreateNormalizedPath("repo");

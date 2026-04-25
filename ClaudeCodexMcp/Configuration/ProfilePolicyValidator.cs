@@ -135,9 +135,18 @@ public sealed class ProfilePolicyValidator : IProfilePolicyValidator
         return title.Trim();
     }
 
+    private const string RepoWildcard = "*";
+
     private static string ResolveAndValidateRepo(ProfileOptions profile, string? requestedRepo, List<PolicyValidationError> errors)
     {
-        var selectedRepo = NullIfWhiteSpace(requestedRepo) ?? NullIfWhiteSpace(profile.Repo);
+        // "*" as profile.Repo means "no default — caller must supply a real repo at dispatch."
+        var profileDefaultRepo = NullIfWhiteSpace(profile.Repo);
+        if (profileDefaultRepo == RepoWildcard)
+        {
+            profileDefaultRepo = null;
+        }
+
+        var selectedRepo = NullIfWhiteSpace(requestedRepo) ?? profileDefaultRepo;
         if (selectedRepo is null)
         {
             errors.Add(new PolicyValidationError("missing_repo", "A repo must be provided by the request or profile.", "repo"));
@@ -145,15 +154,24 @@ public sealed class ProfilePolicyValidator : IProfilePolicyValidator
         }
 
         var normalizedRepo = NormalizePath(selectedRepo);
-        var allowedRepos = profile.AllowedRepos
+
+        var allowedRepoEntries = profile.AllowedRepos
             .Select(NullIfWhiteSpace)
             .Where(path => path is not null)
-            .Select(path => NormalizePath(path!))
+            .Select(path => path!)
             .ToArray();
 
-        if (allowedRepos.Length == 0 && !string.IsNullOrWhiteSpace(profile.Repo))
+        // "*" anywhere in allowedRepos = match any repo.
+        if (allowedRepoEntries.Any(p => p == RepoWildcard))
         {
-            allowedRepos = [NormalizePath(profile.Repo)];
+            return normalizedRepo;
+        }
+
+        var allowedRepos = allowedRepoEntries.Select(NormalizePath).ToArray();
+
+        if (allowedRepos.Length == 0 && profileDefaultRepo is not null)
+        {
+            allowedRepos = [NormalizePath(profileDefaultRepo)];
         }
 
         if (allowedRepos.Length == 0)
