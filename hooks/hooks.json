@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/Invoke-ClaudeStopWakeHook.ps1\"; exit $LASTEXITCODE",
+            "shell": "powershell",
+            "timeout": 1805,
+            "asyncRewake": true,
+            "rewakeSummary": "Codex job completion",
+            "rewakeMessage": "Codex job finished: "
+          }
+        ]
+      }
+    ]
+  }
+}
