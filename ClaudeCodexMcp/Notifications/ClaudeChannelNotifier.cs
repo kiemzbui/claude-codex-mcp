@@ -34,6 +34,10 @@ public sealed class ClaudeChannelNotifier
         {
             return await transport.SendAsync(payloadJson, cancellationToken);
         }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return ClaudeChannelDeliveryResult.Failure(ProjectionSanitizer.ToSummary(exception.Message));
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             return ClaudeChannelDeliveryResult.Failure(ProjectionSanitizer.ToSummary(exception.Message));

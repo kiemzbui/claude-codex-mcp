@@ -4,12 +4,14 @@ using System.IO;
 using ClaudeCodexMcp;
 using ClaudeCodexMcp.Backend;
 using ClaudeCodexMcp.Configuration;
+using ClaudeCodexMcp.Notifications;
 using ClaudeCodexMcp.Tools;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol.Server;
 using Xunit;
 
 namespace ClaudeCodexMcp.Tests;
@@ -64,6 +66,17 @@ public sealed class HostConfigurationTests
             Assert.Equal(1, profile.Value.MaxConcurrentJobs);
             Assert.NotNull(host.Services.GetRequiredService<ICodexBackendSelector>());
             Assert.NotNull(host.Services.GetRequiredService<CodexToolService>());
+            Assert.IsType<McpClaudeChannelTransport>(
+                host.Services.GetRequiredService<IClaudeChannelTransport>());
+
+            var mcpOptions = host.Services.GetRequiredService<IOptions<McpServerOptions>>().Value;
+            Assert.NotNull(mcpOptions.ServerInfo);
+            Assert.Equal("claude-codex-mcp", mcpOptions.ServerInfo!.Name);
+            Assert.NotNull(mcpOptions.Capabilities);
+            Assert.NotNull(mcpOptions.Capabilities!.Tools);
+            Assert.NotNull(mcpOptions.Capabilities.Experimental);
+            Assert.Contains(ClaudeChannelProtocol.ChannelCapability, mcpOptions.Capabilities.Experimental!.Keys);
+            Assert.Contains("wake-up signals", mcpOptions.ServerInstructions);
 
             var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("smoke");
             logger.LogInformation("stage one smoke log");

@@ -11,6 +11,10 @@ public sealed class ManagerStatePaths
         QueuesDirectory = Path.Combine(Root, "queues");
         LogsDirectory = Path.Combine(Root, "logs");
         NotificationsDirectory = Path.Combine(Root, "notifications");
+        WakeSignalsDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".codex-manager",
+            "wake-signals");
         CacheDirectory = Path.Combine(Root, "cache");
     }
 
@@ -23,6 +27,8 @@ public sealed class ManagerStatePaths
     public string LogsDirectory { get; }
 
     public string NotificationsDirectory { get; }
+
+    public string WakeSignalsDirectory { get; }
 
     public string CacheDirectory { get; }
 
@@ -40,6 +46,12 @@ public sealed class ManagerStatePaths
 
     public string GetNotificationLogPath(string jobId) => Path.Combine(NotificationsDirectory, $"{NormalizeFileName(jobId)}.jsonl");
 
+    public string GetWakeSessionDirectory(string wakeSessionId) =>
+        Path.Combine(WakeSignalsDirectory, NormalizeFileName(wakeSessionId));
+
+    public string GetWakeSignalPath(string wakeSessionId, string jobId) =>
+        Path.Combine(GetWakeSessionDirectory(wakeSessionId), $"{NormalizeFileName(jobId)}.json");
+
     public string GetRelativeQueuePath(string jobId) => Path.Combine(".codex-manager", "queues", $"{NormalizeFileName(jobId)}.json");
 
     public string GetRelativeLogPath(string jobId) => Path.Combine(".codex-manager", "logs", $"{NormalizeFileName(jobId)}.jsonl");
@@ -53,6 +65,7 @@ public sealed class ManagerStatePaths
         Directory.CreateDirectory(QueuesDirectory);
         Directory.CreateDirectory(LogsDirectory);
         Directory.CreateDirectory(NotificationsDirectory);
+        Directory.CreateDirectory(WakeSignalsDirectory);
         Directory.CreateDirectory(CacheDirectory);
     }
 

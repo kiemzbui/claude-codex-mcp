@@ -2,8 +2,10 @@ using System.Text.Json.Serialization;
 
 namespace ClaudeCodexMcp.Notifications;
 
+
 public static class ClaudeChannelProtocol
 {
+    public const string ChannelCapability = "claude/channel";
     public const string ChannelNotificationMethod = "notifications/claude/channel";
     public const int ChannelEventHardCapBytes = 4096;
 }
@@ -50,27 +52,35 @@ public sealed record ClaudeChannelNotificationMetadata
     public required string Statusline { get; init; }
 
     [JsonPropertyName("profile")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Profile { get; init; }
 
     [JsonPropertyName("workflow")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Workflow { get; init; }
 
     [JsonPropertyName("thread_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ThreadId { get; init; }
 
     [JsonPropertyName("turn_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TurnId { get; init; }
 
     [JsonPropertyName("session_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SessionId { get; init; }
 
     [JsonPropertyName("queue_item_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? QueueItemId { get; init; }
 
     [JsonPropertyName("request_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? RequestId { get; init; }
 
     [JsonPropertyName("message")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Message { get; init; }
 
     [JsonPropertyName("ts")]

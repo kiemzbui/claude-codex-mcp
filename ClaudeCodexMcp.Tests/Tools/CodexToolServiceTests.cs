@@ -9,11 +9,14 @@ using ClaudeCodexMcp.Usage;
 using ClaudeCodexMcp.Workflows;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace ClaudeCodexMcp.Tests.Tools;
 
 public sealed class CodexToolServiceTests
 {
+    private static readonly SemaphoreSlim SessionEnvironmentGate = new(1, 1);
+
     [Fact]
     public void ListProfilesReturnsCompactPolicySummary()
     {
@@ -76,6 +79,236 @@ public sealed class CodexToolServiceTests
         Assert.False(result.Accepted);
         Assert.Contains(result.Errors, error => error.Code == "workflow_not_allowed");
         Assert.Empty(backend.StartRequests);
+    }
+
+    [Fact]
+    public async Task StartTaskPersistsWakeSessionIdIntoJobAndIndex()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+
+        var start = await service.StartTaskAsync(
+            "implementation",
+            "direct",
+            "Wake me",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-123");
+
+        var stored = await workspace.JobStore.ReadAsync(start.Job!.JobId);
+        var index = await workspace.JobStore.ReadIndexAsync();
+
+        Assert.Equal("claude-session-123", stored?.WakeSessionId);
+        Assert.Equal(
+            "claude-session-123",
+            Assert.Single(index.Jobs, job => job.JobId == start.Job.JobId).WakeSessionId);
+    }
+
+    [Fact]
+    public async Task StartTaskBlocksWhenSameSessionAlreadyHasActiveJob()
+    {
+        using var workspace = TemporaryToolWorkspace.Create(maxConcurrentJobs: 1);
+        var service = workspace.CreateService();
+
+        var first = await service.StartTaskAsync(
+            "implementation",
+            "direct",
+            "Same session one",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-1");
+        var second = await service.StartTaskAsync(
+            "implementation",
+            "direct",
+            "Same session two",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-1");
+
+        Assert.True(first.Accepted);
+        Assert.False(second.Accepted);
+        Assert.Contains(second.Errors, error => error.Code == "max_concurrent_jobs_exceeded");
+    }
+
+    [Fact]
+    public async Task StartTaskAllowsDifferentSessionsToUseSameProfileConcurrently()
+    {
+        using var workspace = TemporaryToolWorkspace.Create(maxConcurrentJobs: 1);
+        var service = workspace.CreateService();
+
+        var first = await service.StartTaskAsync(
+            "implementation",
+            "direct",
+            "Session one",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-1");
+        var second = await service.StartTaskAsync(
+            "implementation",
+            "direct",
+            "Session two",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-2");
+
+        Assert.True(first.Accepted);
+        Assert.True(second.Accepted);
+        Assert.NotEqual(first.Job?.JobId, second.Job?.JobId);
+    }
+
+    [Theory]
+    [InlineData(null, "claude-session-1")]
+    [InlineData("claude-session-1", null)]
+    [InlineData(null, null)]
+    public async Task StartTaskFallsBackToSharedProfileGateWhenAnySessionIdIsMissing(
+        string? firstWakeSessionId,
+        string? secondWakeSessionId)
+    {
+        using var workspace = TemporaryToolWorkspace.Create(maxConcurrentJobs: 1);
+        var service = workspace.CreateService();
+
+        var first = await service.StartTaskAsync(
+            "implementation",
+            "direct",
+            "First job",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: firstWakeSessionId);
+        var second = await service.StartTaskAsync(
+            "implementation",
+            "direct",
+            "Second job",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: secondWakeSessionId);
+
+        Assert.True(first.Accepted);
+        Assert.False(second.Accepted);
+        Assert.Contains(second.Errors, error => error.Code == "max_concurrent_jobs_exceeded");
+    }
+
+    [Fact]
+    public async Task CodexStartTaskFallsBackToClaudeCodeSessionIdEnvironmentVariable()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var tools = new CodexTools(service);
+
+        await SessionEnvironmentGate.WaitAsync();
+        try
+        {
+            var originalClaudeCodeSessionId = Environment.GetEnvironmentVariable("CLAUDE_CODE_SESSION_ID");
+            var originalClaudeSessionId = Environment.GetEnvironmentVariable("CLAUDE_SESSION_ID");
+            var userRoot = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var currentSessionPath = Path.Combine(userRoot, ".codex-manager", "current-session-id.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(currentSessionPath)!);
+            var originalCurrentSession = File.Exists(currentSessionPath)
+                ? await File.ReadAllTextAsync(currentSessionPath)
+                : null;
+
+            try
+            {
+                if (File.Exists(currentSessionPath))
+                {
+                    File.Delete(currentSessionPath);
+                }
+
+                Environment.SetEnvironmentVariable("CLAUDE_CODE_SESSION_ID", "claude-env-session-456");
+                Environment.SetEnvironmentVariable("CLAUDE_SESSION_ID", null);
+
+                var start = await tools.codex_start_task(
+                    "implementation",
+                    "direct",
+                    "Wake from env",
+                    workspace.RepoRoot,
+                    "Prompt");
+
+                var stored = await workspace.JobStore.ReadAsync(start.Job!.JobId);
+                Assert.Equal("claude-env-session-456", stored?.WakeSessionId);
+            }
+            finally
+            {
+                if (originalCurrentSession is null)
+                {
+                    if (File.Exists(currentSessionPath))
+                    {
+                        File.Delete(currentSessionPath);
+                    }
+                }
+                else
+                {
+                    await File.WriteAllTextAsync(currentSessionPath, originalCurrentSession);
+                }
+
+                Environment.SetEnvironmentVariable("CLAUDE_CODE_SESSION_ID", originalClaudeCodeSessionId);
+                Environment.SetEnvironmentVariable("CLAUDE_SESSION_ID", originalClaudeSessionId);
+            }
+        }
+        finally
+        {
+            SessionEnvironmentGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task CodexStartTaskUsesCurrentSessionIdFileWhenOtherSourcesAreUnavailable()
+    {
+        using var workspace = TemporaryToolWorkspace.Create();
+        var service = workspace.CreateService();
+        var tools = new CodexTools(service);
+
+        await SessionEnvironmentGate.WaitAsync();
+        try
+        {
+            var originalClaudeCodeSessionId = Environment.GetEnvironmentVariable("CLAUDE_CODE_SESSION_ID");
+            var originalClaudeSessionId = Environment.GetEnvironmentVariable("CLAUDE_SESSION_ID");
+            Environment.SetEnvironmentVariable("CLAUDE_CODE_SESSION_ID", null);
+            Environment.SetEnvironmentVariable("CLAUDE_SESSION_ID", null);
+
+            var userRoot = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var currentSessionPath = Path.Combine(userRoot, ".codex-manager", "current-session-id.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(currentSessionPath)!);
+
+            string? originalCurrentSession = File.Exists(currentSessionPath)
+                ? await File.ReadAllTextAsync(currentSessionPath)
+                : null;
+
+            try
+            {
+                await File.WriteAllTextAsync(currentSessionPath, "legacy-current-session");
+
+                var start = await tools.codex_start_task(
+                    "implementation",
+                    "direct",
+                    "Wake from current session file",
+                    workspace.RepoRoot,
+                    "Prompt");
+
+                var stored = await workspace.JobStore.ReadAsync(start.Job!.JobId);
+                Assert.Equal("legacy-current-session", stored?.WakeSessionId);
+            }
+            finally
+            {
+                if (originalCurrentSession is null)
+                {
+                    if (File.Exists(currentSessionPath))
+                    {
+                        File.Delete(currentSessionPath);
+                    }
+                }
+                else
+                {
+                    await File.WriteAllTextAsync(currentSessionPath, originalCurrentSession);
+                }
+
+                Environment.SetEnvironmentVariable("CLAUDE_CODE_SESSION_ID", originalClaudeCodeSessionId);
+                Environment.SetEnvironmentVariable("CLAUDE_SESSION_ID", originalClaudeSessionId);
+            }
+        }
+        finally
+        {
+            SessionEnvironmentGate.Release();
+        }
     }
 
     [Fact]
@@ -603,7 +836,7 @@ public sealed class CodexToolServiceTests
 
     private sealed class TemporaryToolWorkspace : IDisposable
     {
-        private TemporaryToolWorkspace(string root, bool allowOverrides, string backendName)
+        private TemporaryToolWorkspace(string root, bool allowOverrides, string backendName, int maxConcurrentJobs)
         {
             Root = root;
             RepoRoot = Path.Combine(root, "repo");
@@ -613,7 +846,7 @@ public sealed class CodexToolServiceTests
             JobStore = new JobStore(Paths);
             QueueStore = new QueueStore(Paths);
             OutputStore = new OutputStore(Paths);
-            Options = CreateOptions(RepoRoot, allowOverrides, backendName);
+            Options = CreateOptions(RepoRoot, allowOverrides, backendName, maxConcurrentJobs);
         }
 
         public string Root { get; }
@@ -632,11 +865,14 @@ public sealed class CodexToolServiceTests
 
         public ManagerOptions Options { get; }
 
-        public static TemporaryToolWorkspace Create(bool allowOverrides = false, string backendName = "fake")
+        public static TemporaryToolWorkspace Create(
+            bool allowOverrides = false,
+            string backendName = "fake",
+            int maxConcurrentJobs = 1)
         {
             var root = Path.Combine(Path.GetTempPath(), "claude-codex-mcp-tool-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            return new TemporaryToolWorkspace(root, allowOverrides, backendName);
+            return new TemporaryToolWorkspace(root, allowOverrides, backendName, maxConcurrentJobs);
         }
 
         public CodexToolService CreateService(
@@ -670,7 +906,11 @@ public sealed class CodexToolServiceTests
             }
         }
 
-        private static ManagerOptions CreateOptions(string repoRoot, bool allowOverrides, string backendName)
+        private static ManagerOptions CreateOptions(
+            string repoRoot,
+            bool allowOverrides,
+            string backendName,
+            int maxConcurrentJobs)
         {
             var profile = new ProfileOptions
             {
@@ -686,6 +926,7 @@ public sealed class CodexToolServiceTests
                 },
                 DefaultWorkflow = CanonicalWorkflows.Direct,
                 AllowedWorkflows = [CanonicalWorkflows.Direct],
+                MaxConcurrentJobs = maxConcurrentJobs,
                 ChannelNotifications = new ChannelNotificationOptions { Enabled = false },
                 DefaultModel = "gpt-5.4",
                 AllowedModels = ["gpt-5.4", "gpt-5.4-codex"],

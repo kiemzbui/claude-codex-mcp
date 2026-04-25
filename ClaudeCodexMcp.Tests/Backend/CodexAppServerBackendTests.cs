@@ -45,6 +45,10 @@ public sealed class CodexAppServerBackendTests
         Assert.Equal("never", threadStart.ApprovalPolicy);
         Assert.Equal("user", threadStart.ApprovalsReviewer);
         Assert.Equal("read-only", threadStart.Sandbox);
+        Assert.Null(threadStart.ServiceTier);
+        var turnStart = client.Requests.Single(request => request.Method == AppServerProtocolNames.TurnStart).Parameters as AppServerTurnStartParams;
+        Assert.NotNull(turnStart);
+        Assert.Null(turnStart.ServiceTier);
 
         var outputStore = new OutputStore(new ManagerStatePaths(workspace.StateDirectory));
         var entries = await outputStore.ReadAsync("job_backend_ids", limit: 20);
@@ -87,6 +91,46 @@ public sealed class CodexAppServerBackendTests
         Assert.Equal("turn-life", completed.BackendIds.TurnId);
     }
 
+    [Fact]
+    public async Task ObserveMapsFailedTurnCompletedNotificationToFailedState()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-failed-turn", "session-failed-turn"));
+        client.EnqueueResponse(TurnStartResponse("turn-failed-turn"));
+        client.EnqueueNotification("""
+            {
+              "method":"turn/completed",
+              "params":{
+                "threadId":"thread-failed-turn",
+                "turn":{
+                  "id":"turn-failed-turn",
+                  "status":"failed",
+                  "error":{
+                    "message":"400 Unsupported service_tier: flex",
+                    "codexErrorInfo":null,
+                    "additionalDetails":null
+                  },
+                  "items":[]
+                }
+              }
+            }
+            """);
+        var backend = CreateBackend(workspace, client);
+        var start = await StartAsync(backend, workspace, "job_failed_turn_notification");
+
+        var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_failed_turn_notification",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(JobState.Failed, status.State);
+        Assert.Equal("turn-failed-turn", status.BackendIds.TurnId);
+        Assert.Equal("400 Unsupported service_tier: flex", status.LastError);
+    }
+
     [Theory]
     [InlineData("completed", JobState.Completed)]
     [InlineData("failed", JobState.Failed)]
@@ -111,6 +155,199 @@ public sealed class CodexAppServerBackendTests
 
         Assert.Equal(expected, status.State);
         Assert.Equal("turn-poll", status.BackendIds.TurnId);
+    }
+
+    [Fact]
+    public async Task ObserveTreatsEmptyRolloutThreadReadErrorsAsRunning()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-empty", "session-empty"));
+        client.EnqueueResponse(TurnStartResponse("turn-empty"));
+        client.EnqueueResponse(Json("""
+            {
+              "error": {
+                "message": "failed to read thread: rollout-2026-04-23T20-11-11.jsonl is empty"
+              }
+            }
+            """));
+        var backend = CreateBackend(workspace, client);
+        var start = await StartAsync(backend, workspace, "job_empty_rollout");
+
+        var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_empty_rollout",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(JobState.Running, status.State);
+        Assert.Equal("failed to read thread: rollout-2026-04-23T20-11-11.jsonl is empty", status.Message);
+        Assert.Null(status.LastError);
+    }
+
+    [Fact]
+    public async Task ObserveTreatsThreadNotMaterializedThreadReadErrorsAsRunning()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-materializing", "session-materializing"));
+        client.EnqueueResponse(TurnStartResponse("turn-materializing"));
+        client.EnqueueResponse(Json("""
+            {
+              "error": {
+                "message": "thread 019dc303-ff73-75f2-82df-4cb7ca596c90 is not materialized yet; includeTurns is unavailable before first user message"
+              }
+            }
+            """));
+        var backend = CreateBackend(workspace, client);
+        var start = await StartAsync(backend, workspace, "job_thread_materializing");
+
+        var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_thread_materializing",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(JobState.Running, status.State);
+        Assert.Equal("thread 019dc303-ff73-75f2-82df-4cb7ca596c90 is not materialized yet; includeTurns is unavailable before first user message", status.Message);
+        Assert.Null(status.LastError);
+    }
+
+    [Fact]
+    public async Task ObserveSurfacesJsonRpcThreadReadErrors()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-error", "session-error"));
+        client.EnqueueResponse(TurnStartResponse("turn-error"));
+        client.EnqueueResponse(Json("""
+            {
+              "error": {
+                "message": "failed to read thread: permission denied"
+              }
+            }
+            """));
+        var backend = CreateBackend(workspace, client);
+        var start = await StartAsync(backend, workspace, "job_thread_read_error");
+
+        var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_thread_read_error",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(JobState.Failed, status.State);
+        Assert.Equal("failed to read thread: permission denied", status.LastError);
+    }
+
+    [Fact]
+    public async Task ObserveRetriesTransientThreadReadErrorsUntilReadSucceeds()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-retry", "session-retry"));
+        client.EnqueueResponse(TurnStartResponse("turn-retry"));
+        client.EnqueueResponse(Json("""
+            {
+              "error": {
+                "message": "failed to read thread: rollout-2026-04-23T20-11-11.jsonl is empty"
+              }
+            }
+            """));
+        client.EnqueueResponse(ThreadReadResponse("thread-retry", "session-retry", "turn-retry", "completed", "retried output"));
+        var backend = CreateBackend(workspace, client, new CodexAppServerBackendOptions
+        {
+            NotificationDrainTimeout = TimeSpan.Zero,
+            ReadinessSignalTimeout = TimeSpan.Zero,
+            ThreadReadRetryDelay = TimeSpan.Zero,
+            ThreadReadMaxAttempts = 2
+        });
+        var start = await StartAsync(backend, workspace, "job_retry_observe");
+
+        var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_retry_observe",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(JobState.Completed, status.State);
+        Assert.Equal("turn-retry", status.BackendIds.TurnId);
+        Assert.Equal(2, client.Requests.Count(request => request.Method == AppServerProtocolNames.ThreadRead));
+    }
+
+    [Fact]
+    public async Task ObserveRetriesThreadNotMaterializedErrorsUntilReadSucceeds()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-materialized-retry", "session-materialized-retry"));
+        client.EnqueueResponse(TurnStartResponse("turn-materialized-retry"));
+        client.EnqueueResponse(Json("""
+            {
+              "error": {
+                "message": "thread 019dc303-ff73-75f2-82df-4cb7ca596c90 is not materialized yet; includeTurns is unavailable before first user message"
+              }
+            }
+            """));
+        client.EnqueueResponse(ThreadReadResponse("thread-materialized-retry", "session-materialized-retry", "turn-materialized-retry", "completed", "retried materialized output"));
+        var backend = CreateBackend(workspace, client, new CodexAppServerBackendOptions
+        {
+            NotificationDrainTimeout = TimeSpan.Zero,
+            ReadinessSignalTimeout = TimeSpan.Zero,
+            ThreadReadRetryDelay = TimeSpan.Zero,
+            ThreadReadMaxAttempts = 2
+        });
+        var start = await StartAsync(backend, workspace, "job_retry_materializing_observe");
+
+        var status = await backend.ObserveStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_retry_materializing_observe",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(JobState.Completed, status.State);
+        Assert.Equal("turn-materialized-retry", status.BackendIds.TurnId);
+        Assert.Equal(2, client.Requests.Count(request => request.Method == AppServerProtocolNames.ThreadRead));
+    }
+
+    [Fact]
+    public async Task PollStatusRetriesTransientThreadReadErrorsUntilReadSucceeds()
+    {
+        using var workspace = TemporaryStateWorkspace.Create();
+        var client = new RecordingAppServerClient();
+        client.EnqueueResponse(OkResponse());
+        client.EnqueueResponse(ThreadStartResponse("thread-poll-retry", "session-poll-retry"));
+        client.EnqueueResponse(TurnStartResponse("turn-poll-retry"));
+        client.EnqueueResponse(Json("""
+            {
+              "error": {
+                "message": "failed to read thread: rollout-2026-04-23T20-11-11.jsonl is empty"
+              }
+            }
+            """));
+        client.EnqueueResponse(ThreadReadResponse("thread-poll-retry", "session-poll-retry", "turn-poll-retry", "completed", "retried poll output"));
+        var backend = CreateBackend(workspace, client, new CodexAppServerBackendOptions
+        {
+            NotificationDrainTimeout = TimeSpan.Zero,
+            ReadinessSignalTimeout = TimeSpan.Zero,
+            ThreadReadRetryDelay = TimeSpan.Zero,
+            ThreadReadMaxAttempts = 2
+        });
+        var start = await StartAsync(backend, workspace, "job_retry_poll");
+
+        var status = await backend.PollStatusAsync(new CodexBackendObserveRequest
+        {
+            JobId = "job_retry_poll",
+            BackendIds = start.BackendIds
+        });
+
+        Assert.Equal(JobState.Completed, status.State);
+        Assert.Equal(2, client.Requests.Count(request => request.Method == AppServerProtocolNames.ThreadRead));
     }
 
     [Fact]
@@ -300,13 +537,22 @@ public sealed class CodexAppServerBackendTests
         Assert.True(fake.SendInputRequests.Single().Options.FastMode);
     }
 
-    private static CodexAppServerBackend CreateBackend(TemporaryStateWorkspace workspace, RecordingAppServerClient client)
+    private static CodexAppServerBackend CreateBackend(
+        TemporaryStateWorkspace workspace,
+        RecordingAppServerClient client,
+        CodexAppServerBackendOptions? options = null)
     {
         var paths = new ManagerStatePaths(workspace.StateDirectory);
         return new CodexAppServerBackend(
             new RecordingAppServerClientFactory(client),
             new OutputStore(paths),
-            new CodexAppServerBackendOptions { NotificationDrainTimeout = TimeSpan.Zero });
+            options ?? new CodexAppServerBackendOptions
+            {
+                NotificationDrainTimeout = TimeSpan.Zero,
+                ReadinessSignalTimeout = TimeSpan.Zero,
+                ThreadReadRetryDelay = TimeSpan.Zero,
+                ThreadReadMaxAttempts = 1
+            });
     }
 
     private static Task<CodexBackendStartResult> StartAsync(

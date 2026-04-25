@@ -165,6 +165,7 @@ public sealed class CodexToolService
         string? model = null,
         string? effort = null,
         bool? fastMode = null,
+        string? wakeSessionId = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(prompt))
@@ -186,7 +187,8 @@ public sealed class CodexToolService
             return new CodexStartTaskResponse { Errors = validation.Errors.Select(ToToolError).ToArray() };
         }
 
-        var activeLimitError = await ValidateConcurrentLimitAsync(validation.Value, cancellationToken);
+        var normalizedWakeSessionId = NormalizeWakeSessionId(wakeSessionId);
+        var activeLimitError = await ValidateConcurrentLimitAsync(validation.Value, normalizedWakeSessionId, cancellationToken);
         if (activeLimitError is not null)
         {
             return new CodexStartTaskResponse { Errors = [activeLimitError] };
@@ -194,7 +196,7 @@ public sealed class CodexToolService
 
         var now = DateTimeOffset.UtcNow;
         var jobId = $"job_{now:yyyyMMddHHmmss}_{Guid.NewGuid():N}";
-        var initialJob = CreateInitialJob(jobId, validation.Value, prompt!, now);
+        var initialJob = CreateInitialJob(jobId, validation.Value, prompt!, now, normalizedWakeSessionId);
         var selectedBackend = SelectBackend(validation.Value);
         await jobStore.SaveAsync(initialJob, cancellationToken);
 
@@ -847,16 +849,30 @@ public sealed class CodexToolService
 
     private async Task<ToolError?> ValidateConcurrentLimitAsync(
         ValidatedDispatchPolicy policy,
+        string? wakeSessionId,
         CancellationToken cancellationToken)
     {
         var index = await jobStore.ReadIndexAsync(cancellationToken);
         var activeCount = index.Jobs.Count(job =>
             string.Equals(job.Profile, policy.Profile, StringComparison.OrdinalIgnoreCase)
+            && SharesAdmissionScope(job.WakeSessionId, wakeSessionId)
             && !IsTerminal(job.Status));
 
         return activeCount >= policy.MaxConcurrentJobs
             ? new ToolError("max_concurrent_jobs_exceeded", "The selected profile has reached its active job limit.", "profile")
             : null;
+    }
+
+    private static bool SharesAdmissionScope(string? existingWakeSessionId, string? requestedWakeSessionId)
+    {
+        var normalizedExisting = NormalizeWakeSessionId(existingWakeSessionId);
+        var normalizedRequested = NormalizeWakeSessionId(requestedWakeSessionId);
+        if (normalizedExisting is null || normalizedRequested is null)
+        {
+            return true;
+        }
+
+        return string.Equals(normalizedExisting, normalizedRequested, StringComparison.Ordinal);
     }
 
     private async Task<(CodexJobRecord Job, CodexBackendOutput? FinalOutput)> RefreshFinalOutputIfAvailableAsync(
@@ -936,7 +952,8 @@ public sealed class CodexToolService
         string jobId,
         ValidatedDispatchPolicy policy,
         string prompt,
-        DateTimeOffset now) => new()
+        DateTimeOffset now,
+        string? wakeSessionId) => new()
     {
         JobId = jobId,
         CreatedAt = now,
@@ -947,6 +964,7 @@ public sealed class CodexToolService
         Title = policy.Title,
         Status = JobState.Queued,
         PromptSummary = ProjectionSanitizer.ToSummary(prompt),
+        WakeSessionId = wakeSessionId,
         Model = policy.Options.Model,
         Effort = policy.Options.Effort,
         FastMode = policy.Options.FastMode,
@@ -956,6 +974,11 @@ public sealed class CodexToolService
         NotificationMode = policy.ChannelNotifications.Enabled ? NotificationModes.Channel : NotificationModes.Disabled,
         NotificationLogPath = Path.Combine(".codex-manager", "notifications", $"{jobId}.jsonl")
     };
+
+    private static string? NormalizeWakeSessionId(string? wakeSessionId) =>
+        string.IsNullOrWhiteSpace(wakeSessionId)
+            ? null
+            : wakeSessionId.Trim();
 
     private static CodexBackendLaunchPolicy CreateLaunchPolicy(ValidatedDispatchPolicy policy)
     {

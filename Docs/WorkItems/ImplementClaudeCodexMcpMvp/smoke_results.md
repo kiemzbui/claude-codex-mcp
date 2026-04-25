@@ -12,13 +12,14 @@
 - *Codex*: `codex --version` -> `codex-cli 0.122.0`.
 - *Codex*: `claude --version` -> `2.1.117 (Claude Code)`.
 - *Codex*: App-server feasibility report says the local app-server supports the required MVP lifecycle, output, usage, rate-limit, and resume capabilities.
-- *Codex*: Channel feasibility report did not verify live delivery through an active `claude --channels server:claude-codex-mcp` session, so channel delivery remains disabled by default and polling recovery is the accepted fallback.
+- *Codex*: Channel feasibility report did not verify live delivery through an active `claude --channels server:claude-codex-mcp` session. A follow-up Gate C correction now implements production MCP channel transport: the server advertises `experimental["claude/channel"]` and sends `notifications/claude/channel` through the active MCP server session when a profile enables channel notifications.
 
 ## Commands Run
 
 - *Codex*: `dotnet test ClaudeCodexMcp.Tests\ClaudeCodexMcp.Tests.csproj --filter FullyQualifiedName~Smoke --no-restore` -> passed, 3 smoke tests.
 - *Codex*: `dotnet build ClaudeCodexMcp.sln` -> passed, 0 warnings, 0 errors.
-- *Codex*: `dotnet test ClaudeCodexMcp.sln --no-restore` -> passed, 112 tests.
+- *Codex*: `dotnet test ClaudeCodexMcp.sln --no-restore` -> passed, 113 tests.
+- *Codex*: `dotnet test ClaudeCodexMcp.Tests\ClaudeCodexMcp.Tests.csproj --filter "FullyQualifiedName~Notifications|FullyQualifiedName~HostConfiguration" --no-restore` -> passed, 21 focused channel/host tests.
 
 ## Automated Smoke Coverage
 
@@ -35,15 +36,23 @@
 - *Codex*: Criteria 15-17 are covered by explicit workflow routing, workflow rejection, recovered job listing, structured `waiting_for_input`, and response through `codex_send_input`.
 - *Codex*: Criteria 18-21 are covered by launch policy assertions, `maxConcurrentJobs = 1`, queued input delivery, and queued input cancellation.
 - *Codex*: Criteria 22-24 are covered by supervisor-driven queue delivery, repeated short wait calls capped at 20 seconds in the smoke flow, and non-empty title dispatch.
-- *Codex*: Criteria 25-26 are covered as fallback-aware behavior: compact channel events are tested when enabled by policy, but live channel delivery was not verified in Stage 5, so polling through `codex_list_jobs`, `codex_status`, and `codex_result` remains the accepted monitoring path.
+- *Codex*: Criteria 25-26 are covered by compact channel event emission, production MCP transport coverage for `notifications/claude/channel`, and polling recovery through `codex_list_jobs`, `codex_status`, and `codex_result`. Live display in an active Claude Code channel-enabled receiver remains the Manual Smoke Gate C check.
 
 ## Degraded Or Unverified Capabilities
 
-- *Codex*: Live Claude Code Channel delivery remains unverified because Stage 5 had no active channel-enabled receiver. Channel support is therefore disabled by default; production behavior is best-effort when enabled and polling is authoritative.
+- *Codex*: Live Claude Code Channel receiver display remains unverified because Stage 5 had no active channel-enabled receiver. This is not accepted as a disabled final state: the server now has production channel transport, declares `claude/channel`, and sends compact channel notifications through MCP. Manual Smoke Gate C should verify visible receipt from an active `claude --channels server:claude-codex-mcp` session using a profile with `channelNotifications.enabled = true`.
 - *Codex*: The Stage 14 automated smoke suite uses deterministic in-process MCP service calls and fake backend implementations for repeatability. It does not start an unattended interactive Claude Code MCP session; Manual Smoke Gate C should perform that human-visible registration/session check.
 - *Codex*: CLI fallback is intentionally degraded. Unsupported live status observation, follow-up input, usage/context windows, and resume are reported through `degradedCapabilities`, and unavailable usage/statusline fields render as `?`.
 
+## Manual Gate C Channel Check
+
+- *Codex*: Register this repo's MCP server in local Claude Code configuration as `claude-codex-mcp`.
+- *Codex*: Start a Claude Code session with `claude --channels server:claude-codex-mcp`.
+- *Codex*: Use a profile with `channelNotifications.enabled = true`.
+- *Codex*: Start a small titled Codex job, wait for completion or a waiting-for-input state, and confirm a compact channel notification is visible in the active Claude Code session.
+- *Codex*: Confirm polling recovery still works for the same job through `codex_list_jobs`, `codex_status`, and `codex_result`.
+
 ## Result
 
-- *Codex*: PASS. Automated Stage 14 smoke tests, solution build, and full solution tests passed.
+- *Codex*: PASS. Automated Stage 14 smoke tests, solution build, focused MCP channel transport tests, and full solution tests passed.
 - *Codex*: Manual Smoke Gate C remains open for manager/human review.

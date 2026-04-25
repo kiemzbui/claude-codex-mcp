@@ -5,4 +5,6 @@ public sealed record CodexJobSupervisorOptions
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(5);
 
     public int MaxTransientFailures { get; init; } = 3;
+
+    public TimeSpan MissingThreadIdGracePeriod { get; init; } = TimeSpan.FromSeconds(15);
 }

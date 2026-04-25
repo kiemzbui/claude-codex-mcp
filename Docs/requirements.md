@@ -11,6 +11,7 @@ This replaces an opinionated external workflow with a thin, user-owned control s
 ## Related Documents
 
 - [proposed_workflow.md](./proposed_workflow.md) defines the intended user workflow, routing rules, profile semantics, Codex skill handoff patterns, and statusline reporting behavior.
+- [WorkItems/StopHookWakeup/plan.md](./WorkItems/StopHookWakeup/plan.md) defines the current session-bound wake-up contract and is the canonical wake-path design note.
 - This requirements document is the implementation contract. If the two documents conflict, update both so the product requirements and workflow guidance stay aligned.
 
 ## Primary Users
@@ -97,11 +98,17 @@ Claude should not construct raw Codex commands or choose arbitrary command flags
   - When the active Codex turn finishes successfully, the server should automatically deliver queued prompts in FIFO order as continuation turns.
   - Claude should not have to remain connected to manually deliver queued prompts.
 
-- Claude Code Channels are the preferred push mechanism.
-  - The target environment supports Claude Code Channels and accepts their research-preview status.
-  - The MCP server should expose a channel-capable mode and emit `notifications/claude/channel` events for important job state changes.
-  - Channel events should wake an active Claude Code session to check job state, not carry full output or transcripts.
-  - Short `codex_status wait=true` polling remains required as the fallback when channels are unavailable, disabled, or the Claude session is not active.
+- Wake-up is session-bound.
+  - Claude acts as a portal into Codex, so the Claude session that calls `codex_start_task` is the only session that should be rewoken for that job.
+  - The MCP layer must capture the caller Claude session id at task start and persist it as `wakeSessionId` / `WakeSessionId`.
+  - Terminal completion must write `.codex-manager/wake-signals/<wakeSessionId>/<jobId>.json` after terminal state is persisted.
+  - The Claude Stop hook must watch only `.codex-manager/wake-signals/<wakeSessionId>/`, consume only that session's files, and exit `2` to rewake the same Claude session.
+  - Short `codex_status wait=true` polling remains the fallback when rewake is unavailable or missed.
+
+- Claude Code channel notifications are optional diagnostics.
+  - The target environment may emit `notifications/claude/channel` events for compact job-state updates.
+  - Channel events are never the authoritative wake path and must not be required for same-session rewake.
+  - Channel failures must not change job lifecycle state.
 
 - Context reporting is estimate-based.
   - The server should calculate context remaining from backend token usage and model context window when both are available.
@@ -119,8 +126,9 @@ Claude should not construct raw Codex commands or choose arbitrary command flags
 - Dispatch-time overrides for Codex model, reasoning effort, and fast mode.
 - Account usage and per-thread context reporting when the backend exposes it.
 - Local persistence of job metadata and logs.
+- Session-bound wake identity persistence and per-session terminal signal files.
 - Repo path allowlisting.
-- Claude Code channel notifications for job state changes when the server is launched with channel support.
+- Optional Claude Code channel notifications for job state changes when enabled by profile or environment.
 - App-server backend first, with room for CLI fallback later.
 
 ## Out of Scope
@@ -194,7 +202,7 @@ Profile configuration must support:
 - `defaultWorkflow`
 - `allowedWorkflows`
 - `maxConcurrentJobs`
-- Optional `channelNotifications` policy, defaulting to enabled when channel support is available.
+- Optional `channelNotifications` policy for best-effort compact channel events, defaulting to disabled unless explicitly enabled.
 - Optional model default.
 - Optional reasoning effort default.
 - Optional fast mode or service tier default.
@@ -234,6 +242,7 @@ Required tools:
   - Starts a Codex task using a named profile.
   - Inputs: `profile`, `workflow`, `prompt`, `title`, optional `repo`, optional `model`, optional `effort`, optional `fastMode`.
   - Returns: `jobId`, status, selected profile, selected workflow, selected repo, selected model/effort/fast mode, channel notification mode, and Codex thread/session ID when available.
+  - Must capture or receive the caller Claude session id at task start and persist it as `WakeSessionId` on the durable job record.
   - Must reject missing or blank titles.
   - Must reject workflows not allowed by the selected profile.
 
@@ -310,7 +319,7 @@ Rules:
 - Because Codex is launched with approval/sandbox bypass enabled, permission prompts should not block jobs.
 - The server should persist every pending input request and response in the job log.
 
-### Channel Push, Polling, and Reconnection
+### Session-Bound Wake-Up and Reconnection
 
 Claude must be able to recover and monitor jobs without chat memory.
 
@@ -320,27 +329,26 @@ Requirements:
 - The server should maintain a compact job index at `.codex-manager/jobs/index.json`.
 - The index should be reconstructable by scanning `.codex-manager/jobs/*.json`.
 - `codex_start_task` should return immediately after a job is accepted unless a profile explicitly requests blocking behavior.
-- When Claude Code Channels are enabled, the server should push compact job-change events into the active Claude session.
-- Channel push is preferred for background monitoring so Claude does not need to actively wait or poll to learn that a job changed state.
-- For active async jobs without channel support, Claude-facing clients should poll `codex_status`.
-- For "wait on job X", Claude should call `codex_status` with `wait = true` and `timeoutSeconds` no higher than 20-25 seconds, repeating until completion or user interruption.
-- Recommended polling interval while the user is waiting and channels are not being used: every 30 seconds.
-- Recommended polling interval for background jobs when channels are unavailable: every 60-120 seconds.
-- Polling should stop when the job reaches `completed`, `failed`, or `cancelled`.
-- Polling should pause and ask the user when the job reaches `waiting_for_input`.
-- Polling should avoid retrieving full output unless the user asks for it or a failure requires detail.
-- After receiving a channel event, Claude should call `codex_status` or `codex_result` for the referenced job rather than relying on the event payload as the source of truth.
+- Every durable job record and job-index entry should persist `WakeSessionId` when task start captured a caller Claude session id.
+- The server should maintain `.codex-manager/wake-signals/<wakeSessionId>/` as the terminal wake directory for that Claude session.
+- On the first transition into `completed`, `failed`, or `cancelled`, the supervisor should write `.codex-manager/wake-signals/<wakeSessionId>/<jobId>.json` after persisting the terminal job state.
+- The same Claude session's Stop hook should consume only its session directory and exit `2` to rewake that session.
+- Optional channel notifications may still be emitted for compact job-change visibility, but they are non-authoritative diagnostics.
+- Routine monitoring is event-driven. Claude does not poll while idle; terminal completion is delivered through session-bound Stop-hook rewake.
+- For explicit "wait on job X" requests, Claude should call `codex_status` with `wait = true` and `timeoutSeconds` no higher than 20-25 seconds, repeating until completion, `waiting_for_input`, or user interruption.
+- `waiting_for_input` should pause monitoring and prompt the user.
+- After rewake, Claude should call `codex_result` (default `detail=full`) for completed jobs and `codex_status` for non-completed terminal or waiting states rather than relying on the signal payload as the source of truth.
 
-### Claude Code Channel Notifications
+### Optional Claude Code Channel Notifications
 
-The server should support Claude Code Channels as the first-class push path for active Claude Code sessions.
+The server may support Claude Code Channels as an additional compact notification path for active Claude Code sessions. Channels are not the authoritative wake path.
 
 Environment requirements:
 
 - Claude Code version must be at least `2.1.80`; the target environment is `2.1.117`.
 - Claude Code must be logged in with `claude.ai`.
 - The channel-capable server must be enabled through Claude Code channel configuration, such as `--channels` or the current development-channel mechanism.
-- Because channels are research-preview, the implementation must retain polling as a fully supported fallback.
+- Because channels are research-preview and not authoritative for wake-up, the implementation must retain session-bound wake signals and polling fallback.
 
 Events to push:
 
@@ -376,7 +384,7 @@ Rules:
 - Channel payloads should include enough identifiers for Claude to call `codex_status`, `codex_result`, or `codex_read_output`.
 - The server should persist whether a channel event was attempted, delivered when observable, or failed when observable.
 - Channel failures must not change job state.
-- If a channel event cannot be delivered, the job remains recoverable through `codex_list_jobs`.
+- If a channel event cannot be delivered, the job remains recoverable through session-bound rewake, `codex_list_jobs`, `codex_status`, and `codex_result`.
 - Channel support may be implemented in the same MCP server process as the tools or in a companion channel server, but both must share the same `.codex-manager/` state.
 
 ### Concurrent Job Handling
@@ -480,6 +488,9 @@ Suggested layout:
     <job-id>.jsonl
   notifications/
     <job-id>.jsonl
+  wake-signals/
+    <wake-session-id>/
+      <job-id>.json
   cache/
     skills.json
     agents.json
@@ -497,6 +508,7 @@ Each job record should include:
 - `status`
 - `promptSummary`
 - `codexThreadId`
+- `wakeSessionId`
 - `model`
 - `effort`
 - `fastMode`
@@ -508,7 +520,7 @@ Each job record should include:
 - `lastError`
 - `logPath`
 - `inputQueue` summary and persisted queue item references
-- `notificationMode`, such as `channel`, `polling`, or `disabled`
+- `notificationMode`, such as `channel` or `disabled`
 - `notificationLogPath`
 
 The full original prompt may be stored locally, but MCP responses should avoid echoing it back unless requested.
@@ -632,16 +644,22 @@ Backend feasibility gate:
 - The prototype must verify whether the backend can start a thread/turn, stream or poll status, read final output, expose token usage/context window, expose account rate-limit windows, and resume or read prior thread state.
 - If app-server cannot support a required feature, document the fallback behavior before implementing that feature.
 
-Channel feasibility gate:
+Wake-path feasibility gate:
 
-- Before implementing full channel notification support, prototype one minimal Claude Code channel notification in the target environment.
-- The prototype must verify the server can register or declare the channel, emit a `notifications/claude/channel` event, and cause an active Claude Code session to receive a compact event payload.
-- If channel delivery cannot be verified, keep channel support disabled by default and rely on short polling until the channel configuration is fixed.
+- Before depending on automatic rewake, verify that task start can capture the caller Claude session id and that the Stop hook can resolve the same id while idle.
+- The prototype must verify terminal signal creation at `.codex-manager/wake-signals/<wakeSessionId>/<jobId>.json`, same-session Stop-hook consumption, and `exit 2` rewake behavior.
+- If same-session rewake cannot be verified, keep automatic rewake disabled and rely on short polling plus `codex_list_jobs` recovery until the session-id contract is fixed.
+
+Optional channel feasibility gate:
+
+- If channel notifications are implemented, prototype one minimal Claude Code channel notification in the target environment.
+- The prototype must verify the server can register or declare the channel, emit `notifications/claude/channel`, and cause an active Claude Code session to receive a compact event payload.
+- If channel delivery cannot be verified, keep channel support disabled by default. This must not block the session-bound wake path.
 
 Background supervisor:
 
 - The server must include a background supervisor or event watcher that runs independently of individual MCP tool calls.
-- The supervisor is responsible for observing active Codex jobs, updating persisted job state, delivering pending queue items when an active turn completes successfully, and emitting channel notifications for important state changes.
+- The supervisor is responsible for observing active Codex jobs, updating persisted job state, writing session-bound terminal wake signals, delivering pending queue items when an active turn completes successfully, and emitting optional channel notifications for important state changes.
 - The supervisor must resume from `.codex-manager/` state on server startup so queued inputs and active jobs are not stranded after a restart.
 - The supervisor should prefer backend event streams when available and fall back to bounded polling when necessary.
 - The default supervisor polling interval for active jobs should be 10-15 seconds, distinct from Claude-facing polling guidance.
@@ -770,8 +788,11 @@ claude-codex-mcp/
 22. The background supervisor delivers queued input, tracks active jobs, and emits notifications without requiring an MCP tool call to be in flight.
 23. Claude can wait on a job using repeated short `codex_status wait=true` calls capped at 20-25 seconds each.
 24. Every job has a useful title supplied by Claude, and the server rejects missing or blank titles.
-25. When Claude Code Channels are enabled, the server pushes compact channel notifications for completed, failed, cancelled, waiting-for-input, and queue-delivery-failure job events.
-26. If channel delivery is unavailable or fails, Claude can still recover and monitor every job through `codex_list_jobs`, `codex_status`, and `codex_result`.
+25. `codex_start_task` captures or receives the caller Claude session id and persists it as `WakeSessionId`.
+26. Terminal job completion writes `.codex-manager/wake-signals/<wakeSessionId>/<jobId>.json` only for the originating Claude session.
+27. The same Claude session Stop hook can consume that signal and rewake the same Claude session.
+28. Optional channel notifications, when enabled, remain compact and never become lifecycle-authoritative.
+29. If rewake or channel delivery is unavailable or fails, Claude can still recover and monitor every job through `codex_list_jobs`, `codex_status`, and `codex_result`.
 
 ## First Implementation Plan
 
@@ -780,7 +801,7 @@ claude-codex-mcp/
 3. Add profile validation for repo allowlists, read-only mode, workflow allowlists, model overrides, effort overrides, fast-mode policy, and `maxConcurrentJobs`.
 4. Generate or vendor Codex app-server protocol bindings from the installed Codex app-server schema.
 5. Prototype the Codex app-server feasibility gate: start a thread, start a turn, observe status, capture output, read token usage, read account rate limits, and recover a prior thread.
-6. Prototype the Claude Code channel feasibility gate: declare/register a channel, emit one compact notification, and verify an active Claude Code session receives it.
+6. Prototype the session-bound wake-path feasibility gate: capture caller Claude session id, persist `WakeSessionId`, write a per-session terminal signal, and verify same-session Stop-hook rewake.
 7. Document any degraded capabilities before continuing implementation.
 8. Add a local JSON job store under `.codex-manager/jobs/`.
 9. Add `.codex-manager/jobs/index.json` and `codex_list_jobs`.
@@ -793,12 +814,12 @@ claude-codex-mcp/
 16. Add explicit `workflow` handling.
 17. Add dispatch option handling for `model`, `effort`, and `fastMode`.
 18. Add `codex_send_input`, `codex_queue_input`, `codex_cancel_queued_input`, and `codex_cancel`.
-19. Add the background supervisor for active job observation, queued-input delivery, and notification emission.
+19. Add the background supervisor for active job observation, queued-input delivery, session-bound terminal wake signals, and optional notification emission.
 20. Add `codex_usage` with percentage-based 5h/weekly usage and context estimates.
 21. Add `codex_read_output` with paginated full-output retrieval.
 22. Add statusline normalization so Codex-backed reports can render `[codex status: context ? | weekly ? | 5h ?]`.
-23. Add Claude Code channel notification support for compact job state events.
-24. Register the MCP server with Claude Code as both a tool server and channel-capable server as needed by Claude Code's channel configuration.
+23. Add session-bound terminal wake signal writing and Stop-hook integration guidance.
+24. Add optional Claude Code channel notification support for compact job state events when explicitly enabled.
 25. Smoke test with read-only discovery:
 
 ```text
@@ -814,7 +835,7 @@ Using the investigation profile, explain this repo's current docs and do not edi
 27. Smoke test workflow routing with a no-op or read-only `$subagent-manager` prompt.
 28. Smoke test job recovery by starting a job, restarting Claude/MCP, and finding it through `codex_list_jobs`.
 29. Smoke test `waiting_for_input` handling with a controlled clarification prompt or backend fixture.
-30. Smoke test channel notification delivery for completed, failed, and waiting-for-input job states.
+30. Smoke test same-session wake-up by starting a job, letting the originating Claude session go idle, and verifying only that session rewakes on terminal completion.
 31. Smoke test queued-input delivery by queuing a prompt, letting the active turn finish, and verifying the supervisor delivers the queued prompt.
 32. Smoke test `codex_cancel_queued_input` by cancelling a pending queue item before delivery.
 33. Smoke test concurrent-job policy by starting a profile-limited job and attempting a second dispatch.
@@ -830,4 +851,4 @@ Using the investigation profile, explain this repo's current docs and do not edi
 
 ## Deferred
 
-- Telegram notification support is deferred. The user already has a custom Telegram notification path, and Claude Code channel support plus the native Telegram channel/plugin ecosystem are the preferred notification paths for now.
+- Telegram notification support is deferred. The user already has a custom Telegram notification path, and the MCP server's primary asynchronous return path is the session-bound Stop-hook wake model.

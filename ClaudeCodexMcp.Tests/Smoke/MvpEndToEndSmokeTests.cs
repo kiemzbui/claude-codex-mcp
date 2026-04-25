@@ -278,10 +278,30 @@ public sealed class MvpEndToEndSmokeTests
         Assert.Contains(rejectedRepo.Errors, error => error.Code == "repo_not_allowed");
         Assert.Contains(rejectedWorkflow.Errors, error => error.Code == "workflow_not_allowed");
 
-        var first = await service.StartTaskAsync(SmokeWorkspace.PrimaryProfileName, CanonicalWorkflows.Direct, "Concurrent one", workspace.RepoRoot, "Prompt");
-        var second = await service.StartTaskAsync(SmokeWorkspace.PrimaryProfileName, CanonicalWorkflows.Direct, "Concurrent two", workspace.RepoRoot, "Prompt");
+        var first = await service.StartTaskAsync(
+            SmokeWorkspace.PrimaryProfileName,
+            CanonicalWorkflows.Direct,
+            "Concurrent one",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-1");
+        var second = await service.StartTaskAsync(
+            SmokeWorkspace.PrimaryProfileName,
+            CanonicalWorkflows.Direct,
+            "Concurrent two",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-1");
+        var third = await service.StartTaskAsync(
+            SmokeWorkspace.PrimaryProfileName,
+            CanonicalWorkflows.Direct,
+            "Concurrent three",
+            workspace.RepoRoot,
+            "Prompt",
+            wakeSessionId: "claude-session-2");
         Assert.True(first.Accepted);
         Assert.False(second.Accepted);
+        Assert.True(third.Accepted);
         Assert.Contains(second.Errors, error => error.Code == "max_concurrent_jobs_exceeded");
 
         var usage = await service.UsageAsync(first.Job!.JobId);
@@ -322,7 +342,8 @@ public sealed class MvpEndToEndSmokeTests
             CanonicalWorkflows.Direct,
             "Failed notification smoke",
             workspace.RepoRoot,
-            "Fail this deterministic smoke job.");
+            "Fail this deterministic smoke job.",
+            wakeSessionId: "claude-session-3");
         Assert.True(failed.Accepted);
         Assert.Equal(JobState.Failed, failed.Job?.Status);
 
@@ -479,6 +500,7 @@ public sealed class MvpEndToEndSmokeTests
                 JobStore,
                 QueueStore,
                 OutputStore,
+                Paths,
                 backend,
                 Locks,
                 NullLogger<CodexJobSupervisor>.Instance,

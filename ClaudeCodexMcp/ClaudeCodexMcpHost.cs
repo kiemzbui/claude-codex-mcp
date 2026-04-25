@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using ClaudeCodexMcp.Backend;
 using ClaudeCodexMcp.Configuration;
 using ClaudeCodexMcp.Discovery;
@@ -12,6 +13,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Console;
+using ModelContextProtocol.Protocol;
 
 namespace ClaudeCodexMcp;
 
@@ -39,7 +41,25 @@ public static class ClaudeCodexMcpHost
         ConfigureServices(builder);
 
         builder.Services
-            .AddMcpServer()
+            .AddMcpServer(options =>
+            {
+                options.ServerInfo = new Implementation
+                {
+                    Name = "claude-codex-mcp",
+                    Title = "Claude Codex MCP",
+                    Version = "0.1.0"
+                };
+                options.Capabilities = new ServerCapabilities
+                {
+                    Tools = new ToolsCapability(),
+                    Experimental = new Dictionary<string, object>
+                    {
+                        [ClaudeChannelProtocol.ChannelCapability] = new()
+                    }
+                };
+                options.ServerInstructions =
+                    "Claude Codex MCP channel messages are wake-up signals. Use codex_status and codex_result for authoritative job state.";
+            })
             .WithStdioServerTransport()
             .WithTools<CodexTools>();
     }
@@ -61,7 +81,7 @@ public static class ClaudeCodexMcpHost
         builder.Services.AddSingleton<CodexCapabilityDiscovery>();
         builder.Services.AddSingleton<CodexJobLockRegistry>();
         builder.Services.AddSingleton<UsageReporter>();
-        builder.Services.AddSingleton<IClaudeChannelTransport, DisabledClaudeChannelTransport>();
+        builder.Services.AddSingleton<IClaudeChannelTransport, McpClaudeChannelTransport>();
         builder.Services.AddSingleton<ClaudeChannelNotifier>();
         builder.Services.AddSingleton<NotificationDispatcher>();
         builder.Services.AddSingleton<CodexJobSupervisorOptions>();

@@ -373,46 +373,32 @@ Claude should ask for:
 
 The server should store raw logs and full output locally, then return references and chunks on demand.
 
-## Reconnection, Channels, And Polling
+## Reconnection And Session-Bound Wake-Up
 
-Claude should assume Codex jobs are asynchronous unless a profile explicitly says otherwise.
+Claude should assume Codex jobs are asynchronous and event-driven. Idle polling is not used; terminal completion is delivered via session-bound Stop-hook rewake.
 
 When Claude starts a job:
 
 1. Call `codex_start_task`.
 2. Report the returned title, `jobId`, profile, workflow, and statusline.
-3. If Claude Code Channels are enabled, tell the user that Claude will receive a channel event when the job changes state.
-4. If the user is actively waiting, call `codex_status` with short `wait=true` loops or poll normally.
-5. If the job is backgrounded and channels are enabled, do not keep polling just to detect completion.
-6. Stop active polling when the job reaches `completed`, `failed`, or `cancelled`.
-7. Pause and ask the user when the job reaches `waiting_for_input`.
+3. Treat the current Claude session as the wake owner. The server captures the caller session id at task start and persists it as `WakeSessionId`.
+4. Idle. Do not poll. Wait for the Stop-hook rewake on terminal transition.
 
-Recommended polling cadence:
+When Claude is rewoken by a terminal signal:
 
-- User is waiting in the conversation and channels are not enough: poll about every 30 seconds, or use short `wait=true` calls.
-- Background monitoring with channels enabled: rely on channel events.
-- Background monitoring when channels are unavailable: poll every 60-120 seconds.
-- Do not retrieve full output while polling unless the user asks for exact output.
+1. Read the signal payload's `jobId`, `title`, state, and short summary.
+2. Call `codex_result` for completed jobs (default `detail=full`); call `codex_status` for cancelled, failed, or `waiting_for_input`.
+3. Ask the user directly if the job is `waiting_for_input`.
+4. Render the standard three-zone wake report: lead-in line, Codex output between separators, metadata block (statusline + job line). When other jobs are still active, append a compact "Other active: ..." footer.
 
-When Claude receives a channel event:
+Wake signals are not the source of truth. Claude should always fetch the current job state before reporting detailed results.
 
-1. Read the event's `jobId`, `title`, state, and short summary.
-2. Call `codex_status` for running, cancelled, failed, or `waiting_for_input` states.
-3. Call `codex_result` for completed jobs unless the user only needs the status.
-4. Ask the user directly if the job is `waiting_for_input`.
-5. Keep the visible report compact and include the Codex statusline.
-
-Channel events are wake-up signals, not the source of truth. Claude should always fetch the current job state before reporting detailed results.
-
-If the user says "wait on job X":
+If the user explicitly says "wait on job X":
 
 1. Call `codex_status` with `wait = true` and `timeoutSeconds = 20`.
-2. Repeat with short wait calls until the job completes, fails, is cancelled, reaches `waiting_for_input`, or the user interrupts.
-3. Keep each returned report compact and include the statusline.
+2. Repeat short wait calls until terminal, `waiting_for_input`, or user interruption.
 
-Do not request long blocking waits. The server caps `wait=true` calls at 25 seconds so MCP transports have room to return cleanly.
-
-Short waits remain the fallback even when channels are enabled, because channels only notify active Claude Code sessions and may be unavailable in non-channel launches.
+Do not request long blocking waits. The server caps `wait=true` calls at 25 seconds. Short waits exist only for explicit "wait on" requests; routine background monitoring relies on the wake path.
 
 When Claude starts in a new chat or after losing context:
 
@@ -431,7 +417,7 @@ Claude should handle it as follows:
 1. Read the structured pending input request from `codex_status`.
 2. Ask the user a direct question using the request summary and options.
 3. Use `codex_send_input` for the clarification answer.
-4. Resume monitoring after the MCP server accepts the response, using channels when enabled or polling as the fallback.
+4. Resume monitoring after the MCP server accepts the response, using the same-session wake path when the originating Claude session stays open or polling as the fallback.
 
 Claude should not expose approval/sandbox bypass as a per-dispatch choice. It is part of the MCP server's Codex invocation policy.
 
@@ -466,7 +452,7 @@ If the user wants to remove a queued prompt before delivery:
 
 Claude can monitor multiple active jobs by calling `codex_status` for each job sequentially. Reports should always include the job title so active jobs are easy to distinguish.
 
-With channels enabled, Claude does not need to poll every active job just to discover completion. The server should send compact channel events for completed, failed, cancelled, waiting-for-input, and queue-delivery-failure states, and Claude should fetch details for only the affected job.
+With session-bound wake enabled, Claude does not need to poll every active job just to discover terminal completion for the originating session. Optional channel events may still be useful for compact diagnostics, but Claude should fetch details for only the affected job.
 
 ## Job Titles
 

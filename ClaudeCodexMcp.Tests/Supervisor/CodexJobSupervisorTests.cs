@@ -12,6 +12,7 @@ using ClaudeCodexMcp.Tools;
 using ClaudeCodexMcp.Workflows;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 
 namespace ClaudeCodexMcp.Tests.Supervisor;
 
@@ -135,6 +136,163 @@ public sealed class CodexJobSupervisorTests
     }
 
     [Fact]
+    public async Task CompletedRefreshWritesWakeSignalIntoOriginatingSessionDirectory()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync(
+            "job_wake_complete",
+            JobState.Running,
+            threadId: "thread-wake",
+            wakeSessionId: "claude-session-123");
+        var backend = new ScriptedSupervisorBackend
+        {
+            Output = new CodexBackendOutput
+            {
+                Summary = "wake summary"
+            }
+        };
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = JobState.Completed,
+            BackendIds = new CodexBackendIds { ThreadId = "thread-wake" }
+        });
+
+        await workspace.CreateSupervisor(backend).RefreshActiveJobsOnceAsync();
+
+        var signalPath = workspace.Paths.GetWakeSignalPath("claude-session-123", "job_wake_complete");
+        Assert.True(File.Exists(signalPath));
+        Assert.False(File.Exists(signalPath + ".tmp"));
+        Assert.False(File.Exists(Path.Combine(workspace.Paths.WakeSignalsDirectory, "job_wake_complete.json")));
+        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(signalPath));
+        Assert.Equal("claude-session-123", document.RootElement.GetProperty("wakeSessionId").GetString());
+        Assert.Equal("job_wake_complete", document.RootElement.GetProperty("jobId").GetString());
+        Assert.Equal("Completed", document.RootElement.GetProperty("status").GetString());
+        Assert.Equal("wake summary", document.RootElement.GetProperty("resultSummary").GetString());
+    }
+
+    [Fact]
+    public async Task TerminalTransitionWithoutWakeSessionIdDoesNotWriteWakeSignal()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync("job_no_wake", JobState.Running, threadId: "thread-nowake");
+        var backend = new ScriptedSupervisorBackend();
+        var wakeSignalsBefore = Directory
+            .GetFiles(workspace.Paths.WakeSignalsDirectory, "*.json", SearchOption.AllDirectories)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = JobState.Completed,
+            BackendIds = new CodexBackendIds { ThreadId = "thread-nowake" }
+        });
+
+        await workspace.CreateSupervisor(backend).RefreshActiveJobsOnceAsync();
+
+        var wakeSignalsAfter = Directory
+            .GetFiles(workspace.Paths.WakeSignalsDirectory, "*.json", SearchOption.AllDirectories)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(wakeSignalsBefore, wakeSignalsAfter);
+    }
+
+    [Fact]
+    public async Task QueuedJobWithoutPersistedThreadIdWithinGracePeriodDoesNotEmitFailedTerminalState()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        var createdAt = DateTimeOffset.UtcNow;
+        await workspace.SaveJobAsync(
+            "job_start_race",
+            JobState.Queued,
+            threadId: null,
+            notificationMode: NotificationModes.Channel,
+            wakeSessionId: "claude-session-race",
+            timestamp: createdAt);
+        var signalPath = workspace.Paths.GetWakeSignalPath("claude-session-race", "job_start_race");
+        if (File.Exists(signalPath))
+        {
+            File.Delete(signalPath);
+        }
+
+        var transport = new RecordingClaudeChannelTransport();
+        var dispatcher = workspace.CreateNotificationDispatcher(transport);
+        var backend = new ScriptedSupervisorBackend();
+        var supervisor = workspace.CreateSupervisor(
+            backend,
+            options: new CodexJobSupervisorOptions
+            {
+                PollInterval = TimeSpan.FromMilliseconds(10),
+                MissingThreadIdGracePeriod = TimeSpan.FromMinutes(1)
+            },
+            notificationDispatcher: dispatcher);
+
+        await supervisor.RefreshActiveJobsOnceAsync();
+
+        var deferred = await workspace.JobStore.ReadAsync("job_start_race");
+        Assert.Equal(JobState.Queued, deferred?.Status);
+        Assert.Equal(0, backend.ObserveCount);
+        Assert.Empty(await workspace.NotificationStore.ReadAsync("job_start_race"));
+        Assert.False(File.Exists(signalPath));
+
+        await workspace.JobStore.SaveAsync(deferred! with
+        {
+            UpdatedAt = createdAt.AddSeconds(1),
+            Status = JobState.Running,
+            CodexThreadId = "thread-start-race",
+            CodexTurnId = "turn-start-race",
+            CodexSessionId = "session-start-race"
+        });
+        backend.EnqueueObserve(new CodexBackendStatus
+        {
+            State = JobState.Completed,
+            BackendIds = new CodexBackendIds
+            {
+                ThreadId = "thread-start-race",
+                TurnId = "turn-start-race",
+                SessionId = "session-start-race"
+            }
+        });
+
+        await supervisor.RefreshActiveJobsOnceAsync();
+
+        var stored = await workspace.JobStore.ReadAsync("job_start_race");
+        Assert.Equal(JobState.Completed, stored?.Status);
+        var records = await workspace.NotificationStore.ReadAsync("job_start_race");
+        Assert.DoesNotContain(records, record => record.EventName == NotificationEventNames.JobFailed);
+        Assert.Contains(records, record => record.EventName == NotificationEventNames.JobCompleted);
+        Assert.Single(transport.Payloads);
+
+        Assert.True(File.Exists(signalPath));
+        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(signalPath));
+        Assert.Equal("Completed", document.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task QueuedJobWithoutPersistedThreadIdBeyondGracePeriodFailsUnrecoverably()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync(
+            "job_stale_queue",
+            JobState.Queued,
+            threadId: null,
+            timestamp: DateTimeOffset.UtcNow.AddMinutes(-5));
+        var backend = new ScriptedSupervisorBackend();
+        var supervisor = workspace.CreateSupervisor(
+            backend,
+            options: new CodexJobSupervisorOptions
+            {
+                PollInterval = TimeSpan.FromMilliseconds(10),
+                MissingThreadIdGracePeriod = TimeSpan.FromSeconds(1)
+            });
+
+        await supervisor.RefreshActiveJobsOnceAsync();
+
+        var stored = await workspace.JobStore.ReadAsync("job_stale_queue");
+        Assert.Equal(JobState.Failed, stored?.Status);
+        Assert.Contains("backend_thread_unrecoverable", stored?.LastError);
+        Assert.Equal(0, backend.ObserveCount);
+    }
+
+    [Fact]
     public async Task TerminalJobsAreNotMovedBackToActiveStates()
     {
         using var workspace = SupervisorWorkspace.Create();
@@ -206,6 +364,24 @@ public sealed class CodexJobSupervisorTests
         Assert.Equal(JobState.Failed, stored?.Status);
         Assert.Contains("backend_thread_unrecoverable", stored?.LastError);
         Assert.Contains("thread no longer exists", stored?.LastError);
+    }
+
+    [Fact]
+    public async Task StartupRecoveryTreatsUnexpectedOperationCanceledAsTransientFailure()
+    {
+        using var workspace = SupervisorWorkspace.Create();
+        await workspace.SaveJobAsync("job_resume_canceled", JobState.Running, threadId: "thread-resume-canceled");
+        var backend = new ScriptedSupervisorBackend();
+        backend.EnqueueResumeException(new OperationCanceledException("resume transport canceled unexpectedly"));
+
+        var result = await workspace.CreateSupervisor(backend).RecoverActiveJobsAsync();
+
+        Assert.Equal(1, result.ActiveJobsScanned);
+        Assert.Equal(1, result.JobsUpdated);
+        Assert.Equal(0, result.JobsFailed);
+        var stored = await workspace.JobStore.ReadAsync("job_resume_canceled");
+        Assert.Equal(JobState.Running, stored?.Status);
+        Assert.Contains("resume transport canceled unexpectedly", stored?.LastError);
     }
 
     [Fact]
@@ -450,14 +626,16 @@ public sealed class CodexJobSupervisorTests
             string jobId,
             JobState state,
             string? threadId,
-            string notificationMode = NotificationModes.Disabled)
+            string notificationMode = NotificationModes.Disabled,
+            string? wakeSessionId = null,
+            DateTimeOffset? timestamp = null)
         {
-            var timestamp = DateTimeOffset.Parse("2026-04-23T12:00:00Z");
+            var effectiveTimestamp = timestamp ?? DateTimeOffset.Parse("2026-04-23T12:00:00Z");
             var job = new CodexJobRecord
             {
                 JobId = jobId,
-                CreatedAt = timestamp,
-                UpdatedAt = timestamp,
+                CreatedAt = effectiveTimestamp,
+                UpdatedAt = effectiveTimestamp,
                 Profile = "implementation",
                 Workflow = CanonicalWorkflows.Direct,
                 Repo = RepoRoot,
@@ -467,6 +645,7 @@ public sealed class CodexJobSupervisorTests
                 CodexThreadId = threadId,
                 CodexTurnId = threadId is null ? null : $"turn-{jobId}",
                 CodexSessionId = threadId is null ? null : $"session-{jobId}",
+                WakeSessionId = wakeSessionId,
                 Model = "gpt-5.4",
                 Effort = "medium",
                 ServiceTier = "normal",
@@ -501,6 +680,7 @@ public sealed class CodexJobSupervisorTests
                 JobStore,
                 QueueStore,
                 OutputStore,
+                Paths,
                 backend,
                 locks ?? new CodexJobLockRegistry(),
                 NullLogger<CodexJobSupervisor>.Instance,
@@ -603,6 +783,8 @@ public sealed class CodexJobSupervisorTests
         public void EnqueueResume(CodexBackendStatus status) => resumeResults.Enqueue(status);
 
         public void EnqueueObserveException(Exception exception) => observeResults.Enqueue(exception);
+
+        public void EnqueueResumeException(Exception exception) => resumeResults.Enqueue(exception);
 
         public void EnqueueSendInput(CodexBackendStatus status) => sendInputResults.Enqueue(status);
 

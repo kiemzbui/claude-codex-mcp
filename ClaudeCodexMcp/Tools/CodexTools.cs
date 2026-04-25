@@ -1,5 +1,7 @@
 using ClaudeCodexMcp.Domain;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using System.Text.Json;
 
 namespace ClaudeCodexMcp.Tools;
 
@@ -65,8 +67,19 @@ public sealed class CodexTools
         string? model = null,
         string? effort = null,
         bool? fastMode = null,
+        RequestContext<CallToolRequestParams>? requestContext = null,
         CancellationToken cancellationToken = default) =>
-        service.StartTaskAsync(profile, workflow, title, repo, prompt, model, effort, fastMode, cancellationToken);
+        service.StartTaskAsync(
+            profile,
+            workflow,
+            title,
+            repo,
+            prompt,
+            model,
+            effort,
+            fastMode,
+            ResolveWakeSessionId(requestContext),
+            cancellationToken);
 
     [McpServerTool]
     public Task<CodexStatusResponse> codex_status(
@@ -139,4 +152,57 @@ public sealed class CodexTools
         bool includeTerminal = true,
         CancellationToken cancellationToken = default) =>
         service.ListJobsAsync(limit, includeTerminal, cancellationToken);
+
+    private static string? ResolveWakeSessionId(RequestContext<CallToolRequestParams>? requestContext)
+    {
+        var transportSessionId = NormalizeSessionId(
+            requestContext?.JsonRpcRequest.Context?.RelatedTransport?.SessionId);
+        if (!string.IsNullOrWhiteSpace(transportSessionId))
+        {
+            return transportSessionId;
+        }
+
+        var boundSessionId = ReadBoundClaudeSessionId();
+        if (!string.IsNullOrWhiteSpace(boundSessionId))
+        {
+            return boundSessionId;
+        }
+
+        // Stdio transports are implicitly single-session and do not provide an MCP
+        // transport session id. Claude Code still exposes its own session UUID to
+        // subprocesses, which is the identity we need for same-session wake files.
+        return NormalizeSessionId(Environment.GetEnvironmentVariable("CLAUDE_CODE_SESSION_ID"))
+            ?? NormalizeSessionId(Environment.GetEnvironmentVariable("CLAUDE_SESSION_ID"));
+    }
+
+    private static string? ReadBoundClaudeSessionId()
+    {
+        try
+        {
+            var userRoot = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrWhiteSpace(userRoot))
+            {
+                return null;
+            }
+
+            // Primary: the active Claude Stop hook updates this on every idle event.
+            // For stdio MCP servers this is the most reliable same-session identity source.
+            var currentSessionPath = Path.Combine(userRoot, ".codex-manager", "current-session-id.txt");
+            if (File.Exists(currentSessionPath))
+            {
+                return NormalizeSessionId(File.ReadAllText(currentSessionPath));
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
+    }
+
+    private static string? NormalizeSessionId(string? sessionId) =>
+        string.IsNullOrWhiteSpace(sessionId)
+            ? null
+            : sessionId.Trim();
 }

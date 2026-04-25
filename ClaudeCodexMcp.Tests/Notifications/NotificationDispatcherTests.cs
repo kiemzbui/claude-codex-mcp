@@ -1,11 +1,15 @@
 using System.IO;
 using System.Linq;
+using System.Threading.Channels;
 using System.Text.Json;
 using ClaudeCodexMcp.Domain;
 using ClaudeCodexMcp.Notifications;
 using ClaudeCodexMcp.Storage;
 using ClaudeCodexMcp.Usage;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
 
 namespace ClaudeCodexMcp.Tests.Notifications;
 
@@ -146,6 +150,72 @@ public sealed class NotificationDispatcherTests
         Assert.DoesNotContain("failure-secret", failed.Error);
     }
 
+    [Fact]
+    public async Task UnexpectedOperationCanceledFromChannelTransportIsRecordedAsFailure()
+    {
+        using var workspace = TemporaryNotificationWorkspace.Create();
+        var dispatcher = workspace.CreateDispatcher(new ThrowingClaudeChannelTransport());
+        var job = workspace.CreateJob("job_canceled_delivery", JobState.Completed) with
+        {
+            NotificationMode = NotificationModes.Channel
+        };
+
+        var result = await dispatcher.DispatchAsync(new NotificationDispatchRequest
+        {
+            EventName = NotificationEventNames.JobCompleted,
+            Job = job,
+            ChannelEnabled = true
+        });
+
+        var records = await workspace.NotificationStore.ReadAsync(job.JobId);
+        Assert.True(result.Failed);
+        var failed = records.Single(record => record.DeliveryState == NotificationDeliveryState.Failed);
+        Assert.Equal(NotificationChannels.ClaudeChannel, failed.Channel);
+        Assert.Contains("transport canceled", failed.Error);
+    }
+
+    [Fact]
+    public async Task McpTransportSendsClaudeChannelNotificationThroughActiveServer()
+    {
+        var mcpTransport = new RecordingMcpTransport();
+        await using var services = new ServiceCollection().BuildServiceProvider();
+        var server = McpServer.Create(
+            mcpTransport,
+            new McpServerOptions(),
+            NullLoggerFactory.Instance,
+            services);
+        var channelTransport = new McpClaudeChannelTransport(server);
+        var payloadJson = ClaudeChannelNotifier.Serialize(new ClaudeChannelNotification
+        {
+            Params = new ClaudeChannelNotificationParams
+            {
+                Content = "Codex completed: Notification test (job_channel)",
+                Meta = new ClaudeChannelNotificationMetadata
+                {
+                    Event = NotificationEventNames.JobCompleted,
+                    JobId = "job_channel",
+                    Title = "Notification test",
+                    Status = "completed",
+                    Statusline = UsageReporter.UnknownStatusline,
+                    Timestamp = "2026-04-23T12:00:00.0000000Z"
+                }
+            }
+        });
+
+        var result = await channelTransport.SendAsync(payloadJson);
+
+        Assert.True(result.Delivered);
+        var notification = Assert.IsType<JsonRpcNotification>(Assert.Single(mcpTransport.SentMessages));
+        Assert.Equal(ClaudeChannelProtocol.ChannelNotificationMethod, notification.Method);
+        Assert.NotNull(notification.Params);
+        Assert.Equal(
+            "Codex completed: Notification test (job_channel)",
+            notification.Params!["content"]!.GetValue<string>());
+        Assert.Equal(
+            "job_channel",
+            notification.Params!["meta"]!["job_id"]!.GetValue<string>());
+    }
+
     private sealed class TemporaryNotificationWorkspace : IDisposable
     {
         private TemporaryNotificationWorkspace(string root)
@@ -230,5 +300,35 @@ public sealed class NotificationDispatcherTests
                 ? ClaudeChannelDeliveryResult.Success()
                 : ClaudeChannelDeliveryResult.Failure(Failure));
         }
+    }
+
+    private sealed class RecordingMcpTransport : ITransport
+    {
+        private readonly Channel<JsonRpcMessage> messages = Channel.CreateUnbounded<JsonRpcMessage>();
+
+        public string SessionId { get; } = "test-session";
+
+        public ChannelReader<JsonRpcMessage> MessageReader => messages.Reader;
+
+        public List<JsonRpcMessage> SentMessages { get; } = [];
+
+        public Task SendMessageAsync(
+            JsonRpcMessage message,
+            CancellationToken cancellationToken = default)
+        {
+            SentMessages.Add(message);
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class ThrowingClaudeChannelTransport : IClaudeChannelTransport
+    {
+        public Task<ClaudeChannelDeliveryResult> SendAsync(
+            string payloadJson,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<ClaudeChannelDeliveryResult>(
+                new OperationCanceledException("transport canceled unexpectedly"));
     }
 }

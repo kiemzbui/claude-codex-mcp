@@ -3,6 +3,7 @@ using System.Text.Json;
 using ClaudeCodexMcp.Backend.AppServerProtocol.CSharp;
 using ClaudeCodexMcp.Domain;
 using ClaudeCodexMcp.Storage;
+using ClaudeCodexMcp.Workflows;
 
 namespace ClaudeCodexMcp.Backend;
 
@@ -86,25 +87,29 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
         var status = new CodexBackendStatus { BackendIds = request.BackendIds, State = JobState.Running };
+        var sawReadinessSignal = false;
 
         if (TryGetClient(request.BackendIds, out var client))
         {
-            await foreach (var notification in client.ReadAvailableNotificationsAsync(options.NotificationDrainTimeout, cancellationToken))
-            {
-                using (notification)
-                {
-                    await AppendEventAsync(request.JobId, request.BackendIds, "backend_notification", "App-server notification received.", notification, cancellationToken);
-                    status = MergeStatus(status, MapNotification(notification, request.BackendIds));
-                    CaptureUsage(notification, request.BackendIds.ThreadId);
-                }
-            }
+            var drain = await DrainNotificationsAsync(client, request.JobId, status.BackendIds, options.NotificationDrainTimeout, cancellationToken);
+            status = MergeStatus(status, drain.Status);
+            sawReadinessSignal = drain.SawReadinessSignal;
         }
 
-        if (status.State is JobState.Running && !string.IsNullOrWhiteSpace(request.BackendIds.ThreadId))
+        if (status.State is JobState.Running &&
+            !sawReadinessSignal &&
+            !string.IsNullOrWhiteSpace(status.BackendIds.ThreadId) &&
+            TryGetClient(status.BackendIds, out var waitingClient) &&
+            options.ReadinessSignalTimeout > TimeSpan.Zero)
         {
-            var read = await ReadThreadAsync(request.JobId, request.BackendIds, cancellationToken);
-            status = MergeStatus(status, MapThreadRead(read.Document, read.Ids));
-            read.Document.Dispose();
+            var readinessDrain = await DrainNotificationsAsync(waitingClient, request.JobId, status.BackendIds, options.ReadinessSignalTimeout, cancellationToken);
+            status = MergeStatus(status, readinessDrain.Status);
+            sawReadinessSignal |= readinessDrain.SawReadinessSignal;
+        }
+
+        if (status.State is JobState.Running && !string.IsNullOrWhiteSpace(status.BackendIds.ThreadId))
+        {
+            status = MergeStatus(status, await ReadThreadStatusWithRetryAsync(request.JobId, status.BackendIds, cancellationToken));
         }
 
         return status;
@@ -120,15 +125,7 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
             throw new CodexBackendThreadUnrecoverableException("A Codex thread id is required for status polling.");
         }
 
-        var read = await ReadThreadAsync(request.JobId, request.BackendIds, cancellationToken);
-        try
-        {
-            return MapThreadRead(read.Document, read.Ids);
-        }
-        finally
-        {
-            read.Document.Dispose();
-        }
+        return await ReadThreadStatusWithRetryAsync(request.JobId, request.BackendIds, cancellationToken);
     }
 
     public async Task<CodexBackendStatus> SendInputAsync(
@@ -286,10 +283,15 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
         }
     };
 
+    private static string? ToAppServerServiceTier(string? serviceTier) =>
+        string.Equals(serviceTier, CodexServiceTiers.Fast, StringComparison.OrdinalIgnoreCase)
+            ? CodexServiceTiers.Fast
+            : null;
+
     private static AppServerThreadStartParams CreateThreadStartParams(CodexBackendStartRequest request) => new()
     {
         Model = request.Options.Model,
-        ServiceTier = request.Options.ServiceTier,
+        ServiceTier = ToAppServerServiceTier(request.Options.ServiceTier),
         Cwd = request.Repo,
         ApprovalPolicy = request.LaunchPolicy.ApprovalPolicy,
         ApprovalsReviewer = request.LaunchPolicy.ApprovalsReviewer,
@@ -310,7 +312,7 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
         ApprovalsReviewer = launchPolicy.ApprovalsReviewer,
         Model = options.Model,
         Effort = options.Effort,
-        ServiceTier = options.ServiceTier
+        ServiceTier = ToAppServerServiceTier(options.ServiceTier)
     };
 
     private static AppServerThreadResumeParams CreateThreadResumeParams(
@@ -420,6 +422,80 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
         return (response, ids with { SessionId = sessionId });
     }
 
+    private async Task<(CodexBackendStatus Status, bool SawReadinessSignal)> DrainNotificationsAsync(
+        IAppServerJsonRpcClient client,
+        string jobId,
+        CodexBackendIds ids,
+        TimeSpan quietPeriod,
+        CancellationToken cancellationToken)
+    {
+        var status = new CodexBackendStatus { BackendIds = ids, State = JobState.Running };
+        var sawReadinessSignal = false;
+
+        await foreach (var notification in client.ReadAvailableNotificationsAsync(quietPeriod, cancellationToken))
+        {
+            using (notification)
+            {
+                await AppendEventAsync(jobId, status.BackendIds, "backend_notification", "App-server notification received.", notification, cancellationToken);
+                sawReadinessSignal |= IsReadinessSignal(notification);
+                status = MergeStatus(status, MapNotification(notification, status.BackendIds));
+                CaptureUsage(notification, status.BackendIds.ThreadId);
+            }
+        }
+
+        return (status, sawReadinessSignal);
+    }
+
+    private async Task<CodexBackendStatus> ReadThreadStatusWithRetryAsync(
+        string jobId,
+        CodexBackendIds ids,
+        CancellationToken cancellationToken)
+    {
+        var status = new CodexBackendStatus { BackendIds = ids, State = JobState.Running };
+        var maxAttempts = Math.Max(1, options.ThreadReadMaxAttempts);
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            var read = await ReadThreadAsync(jobId, status.BackendIds, cancellationToken);
+            CodexBackendStatus readStatus;
+            try
+            {
+                readStatus = MapThreadRead(read.Document, read.Ids);
+            }
+            finally
+            {
+                read.Document.Dispose();
+            }
+
+            status = MergeStatus(status, readStatus);
+            if (!IsTransientThreadReadStatus(readStatus) || attempt == maxAttempts || status.State is not JobState.Running)
+            {
+                return status;
+            }
+
+            if (options.ThreadReadRetryDelay <= TimeSpan.Zero)
+            {
+                continue;
+            }
+
+            if (TryGetClient(status.BackendIds, out var client))
+            {
+                var retryDrain = await DrainNotificationsAsync(client, jobId, status.BackendIds, options.ThreadReadRetryDelay, cancellationToken);
+                status = MergeStatus(status, retryDrain.Status);
+                if (status.State is not JobState.Running)
+                {
+                    return status;
+                }
+            }
+            else
+            {
+                await Task.Delay(options.ThreadReadRetryDelay, cancellationToken);
+            }
+        }
+
+        return status;
+    }
+
     private static CodexBackendStatus MergeStatus(CodexBackendStatus current, CodexBackendStatus next)
     {
         if (next.State is JobState.Completed or JobState.Failed or JobState.Cancelled or JobState.WaitingForInput)
@@ -447,7 +523,7 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
 
         return method switch
         {
-            AppServerProtocolNames.TurnCompleted => new CodexBackendStatus { State = JobState.Completed, BackendIds = ids, Message = "Turn completed." },
+            AppServerProtocolNames.TurnCompleted => MapTurnCompletedNotification(root, ids),
             AppServerProtocolNames.Error => new CodexBackendStatus { State = JobState.Failed, BackendIds = ids, LastError = TryGetString(document, "params", "message") ?? "App-server error." },
             AppServerProtocolNames.ThreadStatusChanged => MapThreadStatus(root.GetProperty("params").GetProperty("status"), ids),
             _ => new CodexBackendStatus { State = JobState.Running, BackendIds = ids }
@@ -456,6 +532,23 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
 
     private static CodexBackendStatus MapThreadRead(JsonDocument document, CodexBackendIds fallbackIds)
     {
+        if (TryGetJsonRpcErrorMessage(document.RootElement) is { } errorMessage)
+        {
+            return IsTransientThreadReadError(errorMessage)
+                ? new CodexBackendStatus
+                {
+                    State = JobState.Running,
+                    BackendIds = fallbackIds,
+                    Message = errorMessage
+                }
+                : new CodexBackendStatus
+                {
+                    State = JobState.Failed,
+                    BackendIds = fallbackIds,
+                    LastError = errorMessage
+                };
+        }
+
         if (!document.RootElement.TryGetProperty("result", out var result) ||
             !result.TryGetProperty("thread", out var thread))
         {
@@ -537,6 +630,69 @@ public sealed class CodexAppServerBackend : ICodexBackend, IAsyncDisposable
         "interrupted" => JobState.Cancelled,
         _ => JobState.Running
     };
+
+    private static CodexBackendStatus MapTurnCompletedNotification(JsonElement root, CodexBackendIds ids)
+    {
+        if (!root.TryGetProperty("params", out var parameters) ||
+            !parameters.TryGetProperty("turn", out var turn) ||
+            turn.ValueKind is not JsonValueKind.Object)
+        {
+            return new CodexBackendStatus
+            {
+                State = JobState.Completed,
+                BackendIds = ids,
+                Message = "Turn completed."
+            };
+        }
+
+        var status = MapTurnStatus(TryGetString(turn, "status"));
+        return new CodexBackendStatus
+        {
+            State = status,
+            BackendIds = ids with { TurnId = TryGetString(turn, "id") ?? ids.TurnId },
+            Message = status is JobState.Completed ? "Turn completed." : null,
+            LastError = status is JobState.Failed
+                ? TryGetString(turn, "error", "message") ?? "Codex turn failed."
+                : null
+        };
+    }
+
+    private static bool IsReadinessSignal(JsonDocument document) =>
+        TryGetString(document, "method") is AppServerProtocolNames.ThreadStatusChanged
+            or AppServerProtocolNames.TurnStarted
+            or AppServerProtocolNames.ItemStarted
+            or AppServerProtocolNames.ItemAgentMessageDelta
+            or AppServerProtocolNames.TurnCompleted;
+
+    private static bool IsTransientThreadReadError(string errorMessage) =>
+        IsEmptyRolloutThreadReadError(errorMessage) ||
+        IsThreadNotMaterializedThreadReadError(errorMessage);
+
+    private static bool IsEmptyRolloutThreadReadError(string errorMessage) =>
+        errorMessage.Contains("rollout", StringComparison.OrdinalIgnoreCase) &&
+        errorMessage.Contains("empty", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsThreadNotMaterializedThreadReadError(string errorMessage) =>
+        errorMessage.Contains("not materialized yet", StringComparison.OrdinalIgnoreCase) ||
+        (errorMessage.Contains("includeTurns", StringComparison.OrdinalIgnoreCase) &&
+         errorMessage.Contains("before first user message", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsTransientThreadReadStatus(CodexBackendStatus status) =>
+        status.State is JobState.Running &&
+        !string.IsNullOrWhiteSpace(status.Message) &&
+        IsTransientThreadReadError(status.Message);
+
+    private static string? TryGetJsonRpcErrorMessage(JsonElement root)
+    {
+        if (root.ValueKind is not JsonValueKind.Object ||
+            !root.TryGetProperty("error", out var error) ||
+            error.ValueKind is not JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return TryGetString(error, "message") ?? "App-server thread/read failed.";
+    }
 
     private void CaptureUsage(JsonDocument document, string? fallbackThreadId)
     {

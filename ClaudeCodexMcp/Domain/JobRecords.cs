@@ -82,6 +82,8 @@ public sealed record CodexJobRecord
 
     public string? CodexSessionId { get; init; }
 
+    public string? WakeSessionId { get; init; }
+
     public string? Model { get; init; }
 
     public string? Effort { get; init; }
@@ -141,6 +143,8 @@ public sealed record JobIndexEntry
     public string? CodexTurnId { get; init; }
 
     public string? CodexSessionId { get; init; }
+
+    public string? WakeSessionId { get; init; }
 
     public string? ResultSummary { get; init; }
 

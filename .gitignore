@@ -371,3 +371,9 @@ codex-manager.local.json
 # .NET test artifacts
 [Tt]est[Rr]esults/
 coverage/
+
+# Crash dumps
+*.stackdump
+
+# Per-machine Claude settings (hook scripts under .claude/scripts/ are committed)
+.claude/settings.local.json

@@ -34,6 +34,12 @@ public sealed record CodexAppServerBackendOptions
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     public TimeSpan NotificationDrainTimeout { get; init; } = TimeSpan.FromMilliseconds(50);
+
+    public TimeSpan ReadinessSignalTimeout { get; init; } = TimeSpan.FromMilliseconds(200);
+
+    public int ThreadReadMaxAttempts { get; init; } = 6;
+
+    public TimeSpan ThreadReadRetryDelay { get; init; } = TimeSpan.FromMilliseconds(250);
 }
 
 public sealed class CodexAppServerProcessClientFactory : IAppServerJsonRpcClientFactory

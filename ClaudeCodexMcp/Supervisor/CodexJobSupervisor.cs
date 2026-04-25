@@ -6,6 +6,7 @@ using ClaudeCodexMcp.Storage;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 
 namespace ClaudeCodexMcp.Supervisor;
 
@@ -14,6 +15,7 @@ public sealed class CodexJobSupervisor : BackgroundService
     private readonly JobStore jobStore;
     private readonly QueueStore queueStore;
     private readonly OutputStore outputStore;
+    private readonly ManagerStatePaths paths;
     private readonly ICodexBackend backend;
     private readonly CodexJobLockRegistry jobLocks;
     private readonly ILogger<CodexJobSupervisor> logger;
@@ -26,6 +28,7 @@ public sealed class CodexJobSupervisor : BackgroundService
         JobStore jobStore,
         QueueStore queueStore,
         OutputStore outputStore,
+        ManagerStatePaths paths,
         ICodexBackend backend,
         CodexJobLockRegistry jobLocks,
         ILogger<CodexJobSupervisor> logger,
@@ -36,6 +39,7 @@ public sealed class CodexJobSupervisor : BackgroundService
         this.jobStore = jobStore;
         this.queueStore = queueStore;
         this.outputStore = outputStore;
+        this.paths = paths;
         this.backend = backend;
         this.jobLocks = jobLocks;
         this.logger = logger;
@@ -134,7 +138,18 @@ public sealed class CodexJobSupervisor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await RecoverActiveJobsAsync(stoppingToken);
+        try
+        {
+            await RecoverActiveJobsAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Codex supervisor startup recovery failed.");
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -178,6 +193,11 @@ public sealed class CodexJobSupervisor : BackgroundService
 
         if (string.IsNullOrWhiteSpace(job.CodexThreadId))
         {
+            if (ShouldDeferMissingThreadIdFailure(job))
+            {
+                return job;
+            }
+
             return await FailUnrecoverableAsync(job, "active job has no persisted backend thread id", cancellationToken);
         }
 
@@ -209,6 +229,10 @@ public sealed class CodexJobSupervisor : BackgroundService
         {
             return await FailUnrecoverableAsync(job, exception.Message, cancellationToken);
         }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return await HandleTransientFailureAsync(job, exception, cancellationToken);
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             return await HandleTransientFailureAsync(job, exception, cancellationToken);
@@ -221,6 +245,11 @@ public sealed class CodexJobSupervisor : BackgroundService
     {
         if (string.IsNullOrWhiteSpace(job.CodexThreadId))
         {
+            if (ShouldDeferMissingThreadIdFailure(job))
+            {
+                return job;
+            }
+
             return await FailUnrecoverableAsync(job, "active job has no persisted backend thread id", cancellationToken);
         }
 
@@ -258,6 +287,10 @@ public sealed class CodexJobSupervisor : BackgroundService
         catch (CodexBackendThreadUnrecoverableException exception)
         {
             return await FailUnrecoverableAsync(job, exception.Message, cancellationToken);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return await HandleTransientFailureAsync(job, exception, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -452,6 +485,32 @@ public sealed class CodexJobSupervisor : BackgroundService
         return updated;
     }
 
+    private bool ShouldDeferMissingThreadIdFailure(CodexJobRecord job)
+    {
+        if (job.Status != JobState.Queued)
+        {
+            return false;
+        }
+
+        var gracePeriod = options.MissingThreadIdGracePeriod;
+        if (gracePeriod <= TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        var threadIdDeadline = job.UpdatedAt + gracePeriod;
+        if (DateTimeOffset.UtcNow > threadIdDeadline)
+        {
+            return false;
+        }
+
+        logger.LogDebug(
+            "Deferring missing backend thread failure for queued job {JobId} until {Deadline:o}.",
+            job.JobId,
+            threadIdDeadline);
+        return true;
+    }
+
     private async Task<CodexJobRecord> FailUnrecoverableAsync(
         CodexJobRecord job,
         string reason,
@@ -478,6 +537,7 @@ public sealed class CodexJobSupervisor : BackgroundService
         CancellationToken cancellationToken)
     {
         await jobStore.SaveAsync(after, cancellationToken);
+        await WriteWakeSignalIfNeededAsync(before, after, cancellationToken);
         if (notificationDispatcher is null)
         {
             return;
@@ -488,6 +548,62 @@ public sealed class CodexJobSupervisor : BackgroundService
             after,
             IsChannelEnabled(after),
             cancellationToken);
+    }
+
+    private async Task WriteWakeSignalIfNeededAsync(
+        CodexJobRecord before,
+        CodexJobRecord after,
+        CancellationToken cancellationToken)
+    {
+        logger.LogInformation(
+            "WriteWakeSignal: job={JobId} before={BeforeStatus} after={AfterStatus} wake={WakeSessionId}",
+            after.JobId, before.Status, after.Status, after.WakeSessionId ?? "(null)");
+
+        if (CodexJobRecordUpdater.IsTerminal(before.Status) || !CodexJobRecordUpdater.IsTerminal(after.Status))
+        {
+            logger.LogInformation(
+                "WriteWakeSignal: skipping — IsTerminal(before={BeforeStatus})={TB} IsTerminal(after={AfterStatus})={TA}",
+                before.Status, CodexJobRecordUpdater.IsTerminal(before.Status),
+                after.Status, CodexJobRecordUpdater.IsTerminal(after.Status));
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(after.WakeSessionId))
+        {
+            logger.LogWarning(
+                "Job {JobId} reached terminal state {Status} without a wake session id; no wake signal was written.",
+                after.JobId,
+                after.Status);
+            return;
+        }
+
+        try
+        {
+            var sessionDirectory = paths.GetWakeSessionDirectory(after.WakeSessionId);
+            Directory.CreateDirectory(sessionDirectory);
+
+            var finalPath = paths.GetWakeSignalPath(after.WakeSessionId, after.JobId);
+            var payload = JsonSerializer.Serialize(new
+            {
+                wakeSessionId = after.WakeSessionId,
+                jobId = after.JobId,
+                title = after.Title,
+                status = after.Status.ToString(),
+                resultSummary = after.ResultSummary ?? string.Empty,
+                ts = DateTimeOffset.UtcNow.ToString("o")
+            });
+
+            await File.WriteAllTextAsync(finalPath, payload, cancellationToken);
+            logger.LogInformation("WriteWakeSignal: wrote {Path}", finalPath);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Failed to write wake signal for job {JobId}.", after.JobId);
+        }
     }
 
     private Task AppendSupervisorErrorAsync(

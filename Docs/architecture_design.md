@@ -43,7 +43,8 @@ Claude Code
       -> profile/workflow policy layer authorizes dispatch
       -> job store records durable state under .codex-manager/
       -> Codex app-server backend starts and observes Codex work
-      -> hosted supervisor updates jobs, delivers queued input, and emits notifications
+      -> hosted supervisor updates jobs, delivers queued input, writes session-bound wake signals, and emits optional notifications
+      -> Claude Stop hook rewakes the same session from .codex-manager/wake-signals/<wakeSessionId>/
       -> optional CLI backend provides degraded fallback
 ```
 
@@ -55,16 +56,25 @@ Use the source structure suggested by the requirements as the ownership map, ada
 
 - `Program.cs`: compose the Generic Host, bind options, register MCP tools, storage, backends, supervisor, notifications, and logging.
 - `Tools/`: expose stable MCP tools only. Tool classes validate input shape, call application services, and return compact DTOs. They do not construct raw Codex commands directly.
-- `Configuration/`: load `codex-manager.json`, profile definitions, allowed repos, allowed workflows, dispatch defaults, override policy, permissions summaries, channel policy, and concurrency limits.
+- `Configuration/`: load `codex-manager.json`, profile definitions, allowed repos, allowed workflows, dispatch defaults, override policy, permissions summaries, optional channel policy, and concurrency limits.
 - `Workflows/`: define canonical workflow names and profile allowlist checks. This layer preserves workflow identity as data instead of embedding workflow selection in prompts.
 - `Discovery/`: discover Codex-visible skills and agents read-only, cache results, and invalidate by mtime or short TTL when mtime cannot be trusted.
-- `Storage/`: own all `.codex-manager/` file formats and atomic persistence for jobs, queues, output logs, notification logs, and discovery caches.
+- `Storage/`: own all `.codex-manager/` file formats and atomic persistence for jobs, queues, output logs, notification logs, wake-signal files, and discovery caches.
 - `Backend/`: hide Codex app-server and CLI details behind `ICodexBackend`. This is the only layer allowed to know backend command/protocol specifics.
 - `Supervisor/`: implement hosted background observation, queue delivery, restart recovery, stale backend recovery, and per-job concurrency control.
 - `Notifications/`: send compact Claude Code Channel notifications when enabled and record attempts or failures. Notification delivery cannot mutate job lifecycle state.
 - `Usage/`: normalize account usage windows, token/context data, estimates, and the preformatted statusline.
 
 This boundary keeps MCP tools thin and makes backend replacement possible without changing Claude-facing contracts.
+
+## Wake Contract
+
+The authoritative wake path is session-bound and filesystem-backed.
+
+- `codex_start_task` must capture or receive the caller Claude session id and persist it as `WakeSessionId` on the durable job record.
+- The supervisor writes `.codex-manager/wake-signals/<wakeSessionId>/<jobId>.json` only when the job first becomes terminal.
+- The Stop hook for that same Claude session watches only its own session directory and exits `2` after consuming the signal.
+- Optional `notifications/claude/channel` delivery is best-effort only and never replaces the session-bound wake path.
 
 ## Tool Surface Ownership
 
@@ -206,9 +216,10 @@ Responsibilities:
 - Fall back to bounded polling when event streams are unavailable.
 - Update persisted job status, summaries, usage/context data, changed-file summaries, test summaries, and errors.
 - Persist backend output/events to `OutputStore`.
+- Persist `WakeSessionId` with job state and write one per-session terminal wake signal on first terminal transition.
 - Detect Codex clarification prompts and move jobs to `waiting_for_input` with structured request data.
 - Deliver queued input in FIFO order after successful active-turn completion.
-- Emit compact channel notifications for required state changes.
+- Emit optional compact channel notifications for required state changes.
 - Apply per-job locking so status refresh, cancellation, queue delivery, and user input do not race.
 - Retry transient backend reconnect failures with backoff.
 
@@ -233,18 +244,19 @@ Default active-job supervisor polling should be 10-15 seconds, distinct from Cla
 
 Before full MVP implementation, build the app-server feasibility gate. It must prove start, observe, output retrieval, usage/context, rate-limit windows, and resume/read-prior-thread behavior. If any required feature fails, document the fallback behavior before implementing dependent features.
 
-## Notifications And Polling Boundary
+## Wake, Notifications, And Polling Boundary
 
-Claude Code Channels are the preferred push mechanism, but polling remains fully supported (`Docs/requirements.md:313`, `Docs/requirements.md:334`, `Docs/proposed_workflow.md:376`).
+Session-bound wake signals are the authoritative asynchronous return path. Optional channel notifications and short polling loops are supporting mechanisms.
 
 Notification rules:
 
-- Channel events are wake-up signals, not source-of-truth state.
+- Files under `.codex-manager/wake-signals/<wakeSessionId>/` are the authoritative terminal wake mechanism.
+- Optional channel events are compact diagnostics, not source-of-truth state.
 - Payloads include compact identifiers: job ID, title, profile, workflow, state, summary, and statusline.
 - Payloads never include raw logs, transcripts, long diffs, secrets, or full prompt bodies.
 - Notification attempts and observable delivery/failure are persisted.
 - Channel failures never change job status.
-- If channels are unavailable, users recover through `codex_list_jobs`, `codex_status`, and `codex_result`.
+- If rewake or channels are unavailable, users recover through `codex_list_jobs`, `codex_status`, and `codex_result`.
 
 Claude-facing `wait=true` status calls must be short. The server caps wait time at 25 seconds; recommended waits use about 20 seconds.
 
@@ -287,12 +299,12 @@ The safest implementation order is infrastructure before behavior:
 1. Scaffold Generic Host, MCP SDK registration, options, and logging so stdio transport rules are correct from the start.
 2. Implement profile/workflow validation before backend dispatch so unsafe requests cannot create side effects.
 3. Implement durable stores and job index before long-running backend work so every accepted job is recoverable.
-4. Prototype app-server and channel feasibility gates before depending on those capabilities.
+4. Prototype app-server and session-bound wake feasibility gates before depending on those capabilities.
 5. Implement the minimal app-server lifecycle: start, status, compact result, and logs.
 6. Add queue persistence and cancellation before automatic queue delivery.
 7. Add the supervisor once storage and backend observation contracts are stable.
 8. Add usage/statusline and paginated full-output retrieval after raw logs and backend usage data exist.
-9. Add channel notifications after notification storage and fallback polling are working.
+9. Add session-bound terminal wake signals after notification storage and fallback polling are working, then add optional channel notifications.
 10. Add CLI fallback only behind `ICodexBackend` and mark degraded capabilities explicitly.
 
 This ordering prevents the highest-risk behaviors, such as background delivery and push notifications, from existing before durable state, locks, backend contracts, and fallback recovery are in place.
@@ -305,7 +317,7 @@ Future `$orchestrate` plan packs should treat this document as the architectural
 - Storage schema changes must include migration or reconstruction behavior for `.codex-manager/`.
 - Supervisor changes must state lock ownership and queue-delivery effects.
 - Backend work must preserve `ICodexBackend` normalization and report capability gaps.
-- Notification work must preserve polling recovery and never make channels lifecycle-authoritative.
+- Notification work must preserve polling recovery and never make channels or any shared notification pool lifecycle-authoritative.
 
 ## Unresolved Design Questions
 
