@@ -1,6 +1,6 @@
 ---
 description: Dispatch a Codex job explicitly. Bypasses NL routing inference.
-argument-hint: [--profile=X] [--workflow=Y] [--model=Z] [--effort=...] [--fast] [--title="..."] <prompt>
+argument-hint: "[flags] <prompt> (--help for full flag list)"
 ---
 
 If the user passed `--help` (anywhere in `$ARGUMENTS`), output the help block below and stop. Otherwise dispatch.
