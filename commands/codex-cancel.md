@@ -1,6 +1,6 @@
 ---
 description: Cancel a running Codex job.
-argument-hint: [jobId]
+argument-hint: "[jobId] (--help for usage)"
 ---
 
 If `$ARGUMENTS` contains `--help`, output the help block and stop. Otherwise resolve and cancel.

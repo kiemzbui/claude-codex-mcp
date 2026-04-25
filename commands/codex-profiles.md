@@ -1,6 +1,6 @@
 ---
 description: List available Codex execution profiles and modes.
-argument-hint: [--detail]
+argument-hint: "[--detail] (--help for usage)"
 ---
 
 If `$ARGUMENTS` contains `--help`, output the help block and stop. Otherwise list.

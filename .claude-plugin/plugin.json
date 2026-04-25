@@ -1,7 +1,7 @@
 {
   "name": "claude-codex-mcp",
   "description": "Routes Codex tasks via local MCP server with session-bound wake-up.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "keywords": ["codex", "mcp", "wake"],
   "mcpServers": {
     "claude-codex-mcp": {

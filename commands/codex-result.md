@@ -1,6 +1,6 @@
 ---
 description: Fetch a Codex job's final output. Defaults to full output, falls back to summary if too large.
-argument-hint: <jobId> [--summary] [--page=N]
+argument-hint: "<jobId> [--summary] [--page=N] (--help for usage)"
 ---
 
 If `$ARGUMENTS` contains `--help`, output the help block and stop. Otherwise resolve and render.

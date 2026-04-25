@@ -1,6 +1,6 @@
 ---
 description: Show Codex job status with context, usage, and metadata.
-argument-hint: [jobId] [--all]
+argument-hint: "[jobId] [--all] (--help for usage)"
 ---
 
 If `$ARGUMENTS` contains `--help`, output the help block and stop. Otherwise resolve and report.
